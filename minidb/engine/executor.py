@@ -1,30 +1,13 @@
-"""PARTIAL: execution scaffold for fixed, temporary logical plans.
+"""把已有执行器接到正式 Plan、CatalogManager 和 StorageEngine 接口。
 
-Already stable:
-
-* the public return type is ``minidb.core.result.QueryResult``;
-* dependencies arrive through the official ``ExecutionContext`` fields.
-
-Still temporary and waiting for teammates:
-
-* plan node classes and their field names wait for Zhang Zhen's
-  ``compiler/plan.py``;
-* table metadata and catalog operations wait for Zhang Zhen's schema and
-  ``CatalogManager`` implementations;
-* row scans and mutations wait for the real page-backed ``StorageEngine``.
-
-Consequently, this file currently imports ``._scaffold`` and recursively
-materializes rows.  Remove that import when the real Plan types land.  The
-final executor must use closeable ``RowScan`` values, preserve ``RowId`` until
-DELETE completes, and never call the legacy create_table/delete_rows methods.
+这里仍把扫描结果收集到内存中，保留原来的简单执行方式。
+表达式求值尚未实现；本文件只预留调用，不补写 expression_eval 的功能。
+源码位置、公共错误、RowCodec、真实页存储仍由对应模块提供。
 """
 
 from __future__ import annotations
 
-from minidb.core.result import QueryResult, ResultColumn
-
-# TEMPORARY IMPORT: see the module docstring and _scaffold.py replacement list.
-from ._scaffold import (
+from minidb.compiler.plan import (
     CreateTablePlan,
     DeletePlan,
     FilterPlan,
@@ -32,36 +15,27 @@ from ._scaffold import (
     Plan,
     ProjectPlan,
     SeqScanPlan,
-    ValuesPlan,
+    validate_plan,
 )
+from minidb.core.result import ExecRecord, QueryResult
+from minidb.core.schema import TableDef, TableRef
+
+from . import expression_eval
 from .context import ExecutionContext
 
 
 class Executor:
-    """Dispatch temporary plans while preserving the final public entry point.
-
-    ``execute(plan, context) -> QueryResult`` is the intended stable call
-    shape.  Operator internals below are scaffolding, not the final execution
-    algorithm.
-    """
+    """接收张振的逻辑计划，调用会话传入的目录和存储对象。"""
 
     def execute(self, plan: Plan, context: ExecutionContext) -> QueryResult:
-        if isinstance(plan, ValuesPlan):
-            columns = [ResultColumn(name, "VARCHAR") for name in plan.columns]
-            return QueryResult(
-                columns=columns,
-                rows=list(plan.rows),
-                affected_rows=None,
-                message="values",
-            )
+        """执行完整语句；内部扫描和过滤节点不能单独作为公开入口。"""
+        # 复用已有校验，不在执行器重复定义一套计划规则。
+        # validate_plan 的源码位置检查仍依赖待提供的 core/source.py。
+        validate_plan(plan)
         if isinstance(plan, CreateTablePlan):
             return self._execute_create_table(plan, context)
         if isinstance(plan, InsertPlan):
             return self._execute_insert(plan, context)
-        if isinstance(plan, SeqScanPlan):
-            return self._execute_seq_scan(plan, context)
-        if isinstance(plan, FilterPlan):
-            return self._execute_filter(plan, context)
         if isinstance(plan, ProjectPlan):
             return self._execute_project(plan, context)
         if isinstance(plan, DeletePlan):
@@ -71,82 +45,82 @@ class Executor:
     def _execute_create_table(
         self, plan: CreateTablePlan, context: ExecutionContext
     ) -> QueryResult:
-        # TEMPORARY: final CreateTable execution must reserve a table id through
-        # CatalogManager, call StorageEngine.create_heap, then persist/register
-        # the completed TableDef.  The current stand-ins cannot express that yet.
-        context.catalog.register_table(plan.table)
-        context.storage.create_table(plan.table)
-        context.storage.sync()
+        """先领表号，再创建根页，最后把完整表定义交给目录登记。"""
+        table_id = context.catalog.reserve_table_id()
+        root_page_id = context.storage.create_heap(table_id)
+        table = TableDef(TableRef(table_id, plan.table_name, root_page_id), plan.schema)
+        # 沿用已有目录持久化方法；其 RowCodec 依赖缺失时会报错，不跳过预检。
+        context.catalog.persist_and_register(table)
+        # 写入后的 sync 由 Session 统一调用，与 CatalogManager 的约定一致。
         return QueryResult(affected_rows=0, message="CREATE TABLE OK")
 
     def _execute_insert(self, plan: InsertPlan, context: ExecutionContext) -> QueryResult:
-        table = self._require_table(plan.table_name, context)
-        context.storage.insert_row(table, plan.row)
-        context.storage.sync()
+        """正式 InsertPlan 已携带表定义和排好列序的行，直接传给存储。"""
+        context.storage.insert_row(plan.table, plan.row)
         return QueryResult(affected_rows=1, message="1 row inserted")
 
     def _execute_seq_scan(
         self, plan: SeqScanPlan, context: ExecutionContext
-    ) -> QueryResult:
-        # TEMPORARY: the final storage scan yields StoredRow and must be closed
-        # in a finally block.  This stub storage returns a materialized Row list.
-        table = self._require_table(plan.table_name, context)
-        rows = context.storage.scan_rows(table)
-        return QueryResult(
-            columns=[ResultColumn(column.name, column.data_type) for column in table.columns],
-            rows=rows,
-            affected_rows=None,
-            message=f"{len(rows)} rows selected",
-        )
+    ) -> list[ExecRecord]:
+        """把存储记录转成执行记录，保留删除要用的位置，并关闭扫描。"""
+        scan = context.storage.scan_rows(plan.table)
+        primary_error = None
+        try:
+            return [ExecRecord(record.values, record.row_id) for record in scan]
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                scan.close()
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                # 读取和关闭同时失败时，让调用者仍能看到最初的读取异常。
+                primary_error.add_note(f"关闭扫描时又发生异常：{cleanup_error}")
 
-    def _execute_filter(self, plan: FilterPlan, context: ExecutionContext) -> QueryResult:
-        # TEMPORARY: predicates are Python callables until BoundExpr and the
-        # shared expression type rules are supplied by Zhang Zhen.
-        result = self.execute(plan.child, context)
-        rows = [row for row in result.rows if plan.predicate(row)]
-        return QueryResult(
-            columns=result.columns,
-            rows=rows,
-            affected_rows=None,
-            message=f"{len(rows)} rows selected",
-        )
+    def _execute_filter(self, plan: FilterPlan, context: ExecutionContext) -> list[ExecRecord]:
+        """沿用已有过滤循环，只把可调用条件替换成正式表达式求值接口。"""
+        # 工作计划已约定周升荣提供：
+        # evaluate(expr: BoundExpr, row: Row) -> int | str | bool。
+        # Filter 的条件已经过 BOOL 类型校验，求值时传完整原行，保留其 RowId。
+        evaluate = getattr(expression_eval, "evaluate", None)
+        if evaluate is None:
+            # 即使表为空也先提示缺少实现，不能误报 WHERE 已经可用。
+            raise NotImplementedError("WHERE 等待 expression_eval.evaluate(expr, row) 实现")
+        records = self._execute_stream(plan.child, context)
+        return [record for record in records if evaluate(plan.predicate, record.values)]
+
+    def _execute_stream(
+        self, plan: SeqScanPlan | FilterPlan, context: ExecutionContext
+    ) -> list[ExecRecord]:
+        """内部节点传递带 RowId 的记录，避免过早转成最终查询结果。"""
+        if isinstance(plan, SeqScanPlan):
+            return self._execute_seq_scan(plan, context)
+        if isinstance(plan, FilterPlan):
+            return self._execute_filter(plan, context)
+        raise TypeError(f"unsupported stream type: {type(plan).__name__}")
 
     def _execute_project(self, plan: ProjectPlan, context: ExecutionContext) -> QueryResult:
-        result = self.execute(plan.child, context)
-        positions = []
-        output_columns = []
-        for column_name in plan.columns:
-            try:
-                position = next(
-                    index
-                    for index, column in enumerate(result.columns)
-                    if column.name == column_name
-                )
-            except StopIteration as exc:
-                raise ValueError(
-                    f"column not found in plan result: {column_name}"
-                ) from exc
-            positions.append(position)
-            output_columns.append(result.columns[position])
-        rows = [tuple(row[index] for index in positions) for row in result.rows]
+        """使用计划中已绑定的列序号投影，输出列顺序和名称也直接取自计划。"""
+        records = self._execute_stream(plan.child, context)
+        rows = [tuple(record.values[index] for index in plan.column_indexes) for record in records]
+        # 最终 QueryResult 只携带值，不再暴露用于删除的 RowId。
         return QueryResult(
-            columns=output_columns,
+            columns=list(plan.output_columns),
             rows=rows,
             affected_rows=None,
             message=f"{len(rows)} rows selected",
         )
 
     def _execute_delete(self, plan: DeletePlan, context: ExecutionContext) -> QueryResult:
-        # TEMPORARY: final DELETE collects RowIds from a closed child scan,
-        # calls delete_row for each, and only then reclaims empty pages.
-        table = self._require_table(plan.table_name, context)
-        deleted = context.storage.delete_rows(table, plan.predicate)
-        context.storage.sync()
+        """用正式逐行删除接口替换旧 delete_rows，统计实际删除的数量。"""
+        # _execute_stream 返回前已关闭扫描，之后才允许修改存储。
+        records = self._execute_stream(plan.child, context)
+        deleted = 0
+        for record in records:
+            if context.storage.delete_row(plan.table, record.row_id):
+                deleted += 1
+        # 所有 RowId 用完后才能回收空页，避免尚未删除的记录位置提前失效。
+        context.storage.reclaim_empty_pages(plan.table)
         return QueryResult(affected_rows=deleted, message=f"{deleted} rows deleted")
-
-    @staticmethod
-    def _require_table(name: str, context: ExecutionContext):
-        table = context.catalog.find_table(name)
-        if table is None:
-            raise KeyError(f"table not found: {name}")
-        return table
