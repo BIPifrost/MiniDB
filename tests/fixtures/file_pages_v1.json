@@ -1,0 +1,30 @@
+{
+  "specification": "MiniDB v1.1 section 8 and section 17.2",
+  "format_version": 1,
+  "page_size": 4096,
+  "initial_file_header": {
+    "page_id": 0,
+    "prefix_hex": "4d494e494442303101000000001000000100000002000000ffffffff",
+    "zero_padding_bytes": 4068,
+    "fields": {
+      "magic": "MINIDB01",
+      "format_version": 1,
+      "page_size": 4096,
+      "catalog_root_page_id": 1,
+      "next_page_id": 2,
+      "free_head": 4294967295
+    }
+  },
+  "initial_catalog_reserved_page": {
+    "page_id": 1,
+    "prefix_hex": "",
+    "zero_padding_bytes": 4096,
+    "note": "Reserved zero page before Catalog bootstrap; not a valid DataPage yet."
+  },
+  "terminal_free_page": {
+    "prefix_hex": "ffffffff",
+    "zero_padding_bytes": 4092,
+    "next_free_page_id": 4294967295
+  },
+  "initial_file_size": 8192
+}
