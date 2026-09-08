@@ -271,7 +271,7 @@ class ReplacementPolicyTests(unittest.TestCase):
 
 class PageValidationTests(unittest.TestCase):
     def assert_error(self, code, callback, **kwargs):
-        from minidb.storage._errors import DbError, ErrorStage
+        from minidb.core.errors import DbError, ErrorStage
         with self.assertRaises(DbError) as caught:
             callback(**kwargs)
         error = caught.exception
@@ -285,7 +285,7 @@ class PageValidationTests(unittest.TestCase):
         return error
 
     def test_temporary_error_contract(self):
-        from minidb.storage._errors import DbError, ErrorStage, DB_FORMAT_MISMATCH
+        from minidb.core.errors import DbError, ErrorStage, DB_FORMAT_MISMATCH
         context = {'page_id': 0, 'expected': [1]}
         error = DbError(ErrorStage.STORAGE, DB_FORMAT_MISMATCH, 'bad header', context=context)
         context['expected'].append(2)
@@ -398,7 +398,7 @@ class FileManagerTests(unittest.TestCase):
         return fm
 
     def assert_code(self, code, call, *args, **kwargs):
-        from minidb.storage._errors import DbError, ErrorStage
+        from minidb.core.errors import DbError, ErrorStage
         with self.assertRaises(DbError) as caught:
             call(*args, **kwargs)
         self.assertEqual(caught.exception.code, code)

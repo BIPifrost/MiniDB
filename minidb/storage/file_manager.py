@@ -2,7 +2,7 @@
 
 Ordinary business page access must go through the future BufferPool. This
 layer owns page 0 and free-list metadata. It does not validate DataPage slots.
-Uses the explicitly authorized temporary storage-local error contract.
+Errors use the shared core contract, also consumed by Schema and Catalog.
 """
 
 import os
@@ -13,7 +13,8 @@ from minidb.core.disk_types import PAGE_SIZE, MAX_PAGE_ID, INVALID_PAGE_ID
 from minidb.storage.page import (
     FileHeader, initial_file_header_page, decode_file_header, decode_free_page,
 )
-from minidb.storage import _errors as errors
+# 使用已移到公共目录的同一套错误定义，目录层可以直接识别底层异常。
+from minidb.core import errors
 
 
 class FileManager:
@@ -74,10 +75,10 @@ class FileManager:
                 manager.close()
             except errors.DbError as cleanup:
                 if isinstance(original, errors.DbError):
-                    original.context.setdefault('cleanup_errors', []).append({
+                    original._update_context(cleanup_errors=[*original.context.get('cleanup_errors', ()), {
                         'stage': cleanup.stage.name, 'code': cleanup.code,
-                        'message': cleanup.message, 'span': None, 'context': cleanup.context,
-                    })
+                        'message': cleanup.message, 'context': cleanup.context,
+                    }])
                 else:
                     original.add_note(str(cleanup))
             raise
@@ -132,7 +133,7 @@ class FileManager:
                 current = decode_free_page(self._read_raw(current), page_id=current,
                                            next_page_id=self._header.next_page_id)
             except errors.DbError as exc:
-                exc.context.setdefault('path', self._path)
+                exc._update_context(path=self._path)
                 raise
         self._free_pages = free_pages
 

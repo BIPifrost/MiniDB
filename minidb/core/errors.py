@@ -215,9 +215,9 @@ def _freeze_json(value: Any, path: str) -> Any:
         if not math.isfinite(value):
             raise ValueError(f"DbError.context['{path}'] 必须是有限 JSON 数字")
         return value
-    if type(value) is list:
+    if isinstance(value, list):
         return _FrozenList(_freeze_json(item, f"{path}[{index}]") for index, item in enumerate(value))
-    if type(value) is dict:
+    if isinstance(value, dict):
         frozen = _FrozenDict()
         for key, item in value.items():
             if type(key) is not str:
@@ -231,11 +231,12 @@ def _freeze_json(value: Any, path: str) -> Any:
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class DbError(Exception):
     """结构化错误，见工作计划第 6.1 节、第 15.12 节。
 
-    继承 Exception，可以直接 raise / except。frozen 保证构造后不可修改。
+    继承 Exception，可以直接 raise / except。错误字段构造后不可修改，
+    但保留 Exception 写入 traceback、cause 等运行时属性的能力。
 
     Attributes:
         stage: 错误发生阶段（LEXICAL/SYNTAX/SEMANTIC/PLAN/EXECUTION/STORAGE）。
@@ -252,10 +253,19 @@ class DbError(Exception):
     stage: ErrorStage
     code: str
     message: str
-    span: SourceSpan | None
+    span: SourceSpan | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    _sealed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False) and name in {
+            "stage", "code", "message", "span", "context"
+        }:
+            raise TypeError("DbError 构造后的字段不可修改")
+        object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
+        Exception.__init__(self, self.message)
         if not isinstance(self.stage, ErrorStage):
             raise TypeError(
                 f"DbError.stage 必须是 ErrorStage，实际为 {type(self.stage).__name__}"
@@ -288,6 +298,15 @@ class DbError(Exception):
             )
         frozen_context = _freeze_json(self.context, "context")
         object.__setattr__(self, "context", frozen_context)
+        object.__setattr__(self, "_sealed", True)
+
+    def _update_context(self, **updates: Any) -> None:
+        """供跨层包装代码补充上下文，外部仍不能直接修改 context。"""
+        if not updates:
+            return
+        merged = dict(self.context)
+        merged.update(updates)
+        object.__setattr__(self, "context", _freeze_json(merged, "context"))
 
     def __str__(self) -> str:
         """供 CLI 展示的可读错误信息（工作计划第 2.3 节：错误报告行、列、原因）。"""

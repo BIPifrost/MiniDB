@@ -1,7 +1,7 @@
 """File-header and free-page layout for MiniDB disk format 1.
 
 This module does not describe DataPage record slots (owned by data_page.py).
-Pure byte encoding and decoding use the temporary storage-local DbError.
+Pure byte encoding and decoding use the shared core DbError.
 File I/O, allocation state and free-chain traversal belong to FileManager.
 No database file is opened or modified by these helpers.
 """
@@ -55,9 +55,9 @@ def terminal_free_page() -> bytes:
     return FREE_NEXT_STRUCT.pack(INVALID_PAGE_ID) + bytes(FREE_RESERVED_SIZE)
 
 
-# Temporary import boundary; replace with minidb.core.errors after team review.
+# 原有错误定义已移到 core；页校验和上层目录共用这一份异常类型。
 from dataclasses import dataclass
-from minidb.storage._errors import (
+from minidb.core.errors import (
     DbError, ErrorStage, INVALID_ARGUMENT, PAGE_ID_INVALID, RESERVED_PAGE,
     PAGE_NOT_ALLOCATED, DB_FORMAT_MISMATCH, DB_FILE_TRUNCATED,
 )
