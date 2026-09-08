@@ -24,6 +24,7 @@ from minidb.compiler.plan import (
     SeqScanPlan,
 )
 from minidb.core.expressions import ExprOp
+from minidb.core.errors import DbError, ErrorStage, INVALID_PLAN
 from minidb.core.records import RowId
 from minidb.core.result import ResultColumn
 from minidb.core.schema import DataType
@@ -193,15 +194,16 @@ class ExecutorIntegrationTests(unittest.TestCase):
         self.assertEqual(self.executor.execute(self._project(), self.context).rows, [(1, "Alice", 20)])
 
     def test_invalid_roots_are_rejected_before_storage(self):
-        """复用张振已有的结构校验；只替换尚缺的公共错误出口。"""
+        """复用张振的结构校验，现在直接验证接通后的公共 DbError。"""
         plans = (SeqScanPlan(self.table, self.span), self._filtered_scan(),
                  DeletePlan(self.table, self._project(), self.span))
         for plan in plans:
             with self.subTest(plan=type(plan).__name__):
-                with patch("minidb.compiler._checks._contract_error", side_effect=ValueError("非法计划")), \
-                     patch.object(self.storage, "scan_rows") as scan:
-                    with self.assertRaisesRegex(ValueError, "非法计划"):
+                with patch.object(self.storage, "scan_rows") as scan:
+                    with self.assertRaises(DbError) as raised:
                         self.executor.execute(plan, self.context)
+                    self.assertEqual(raised.exception.code, INVALID_PLAN)
+                    self.assertIs(raised.exception.stage, ErrorStage.PLAN)
                     scan.assert_not_called()
 
     def test_scan_failure_still_closes_and_prevents_delete(self):

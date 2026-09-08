@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from minidb.core.disk_types import CATALOG_ROOT_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID, MAX_PAGE_ID
+
 
 class DataType(Enum):
     """项目中的数据类型：INT 为整数，VARCHAR 为字符串，BOOL 仅用于条件结果。"""
@@ -18,8 +20,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", flags=re.ASCII)
 
 
 def _invalid(operation: str, field: str, expected: str, actual: object) -> None:
-    # 公共错误模块由赵凯航提供。按需导入，使合法对象和列查找可先独立验证；
-    # 错误分支需要接入该模块后才能运行，不在本文件定义替代异常。
+    # 与目录和存储共用 core.errors 中已有的错误定义。
     """使用公共 DbError 报告构造或查列参数不符合约定。"""
     from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
 
@@ -131,18 +132,19 @@ class TableRef:
         normalized = _normalize_identifier(self.name, "TableRef")
         if self.name != normalized:
             _invalid("TableRef", "name", "已转为小写的标识符", self.name)
-        if type(self.root_page_id) is not int or not 1 <= self.root_page_id <= 0xFFFFFFFE:
+        # 根页边界取自廖杰提供的磁盘契约；表号仍使用自己的编号范围。
+        if type(self.root_page_id) is not int or not CATALOG_ROOT_PAGE_ID <= self.root_page_id <= MAX_PAGE_ID:
             _invalid("TableRef", "root_page_id", "1 至 0xFFFFFFFE 的 int，不接受 bool", self.root_page_id)
 
         if self.table_id == 0:
             if self.name != SYSTEM_CATALOG_NAME:
                 _invalid("TableRef", "name", SYSTEM_CATALOG_NAME, self.name)
-            if self.root_page_id != 1:
+            if self.root_page_id != CATALOG_ROOT_PAGE_ID:
                 _invalid("TableRef", "root_page_id", "系统目录固定为 1", self.root_page_id)
         else:
             if self.name.startswith("_sys_"):
                 _invalid("TableRef", "name", "用户表名不能使用 _sys_ 前缀", self.name)
-            if self.root_page_id < 2:
+            if self.root_page_id < FIRST_ALLOCATABLE_PAGE_ID:
                 _invalid("TableRef", "root_page_id", "用户表根页号至少为 2", self.root_page_id)
 
 

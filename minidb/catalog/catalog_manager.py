@@ -8,7 +8,7 @@
     insert_row(table: TableDef, row: Row) -> RowId
 其中 RowScan 可迭代 StoredRow，提供 close() -> None；StoredRow 有 values、row_id。
 赵凯航的 RowCodec()：encoded_size(row: Row, schema: Schema) -> int。
-公共 DbError(stage, code, message, span, context) 也由赵凯航提供。
+公共 DbError(stage, code, message, span, context) 已复用队友写好的实现。
 
 会话由 CLI/Session 装配。sync/close/abort 仍由 Session 调度；本模块不会
 自行创建文件、实现页读写或用 JSON 文件替代系统目录。
@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING, NoReturn
 
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows
+from minidb.core.disk_types import PAGE_SIZE
 from minidb.core.schema import TableDef
+from minidb.storage.data_page import DATA_PAGE_HEADER_SIZE, RECORD_SLOT_SIZE
 
 if TYPE_CHECKING:
     from minidb.core.records import Row
@@ -44,7 +46,7 @@ class CatalogManager:
         if type(is_new) is not bool:
             _error("INVALID_ARGUMENT", "is_new 必须为 bool", "bootstrap_or_load",
                    field="is_new", expected="bool", actual=repr(is_new))
-        # 只检查本模块确实使用的接口，不导入尚未实现的 StorageEngine 类。
+        # 检查目录实际需要的存储方法；具体存储对象由会话传入。
         for method in ("initialize_reserved_heap", "validate_table_root", "scan_rows", "insert_row"):
             if not callable(getattr(storage, method, None)):
                 _error("INVALID_ARGUMENT", "存储对象缺少目录所需接口", "bootstrap_or_load",
@@ -116,12 +118,13 @@ def _preflight_rows(rows: tuple[Row, ...]) -> None:
     from minidb.storage.row_codec import RowCodec
 
     codec = RowCodec()
+    # 共用已有页格式常量：4096 字节页 - 32 字节页头 - 8 字节记录槽。
+    max_size = PAGE_SIZE - DATA_PAGE_HEADER_SIZE - RECORD_SLOT_SIZE
     for row in rows:
         size = codec.encoded_size(row, SYSTEM_CATALOG_TABLE.schema)
-        # 工作计划 8.4 节：4096 字节页 - 32 字节页头 - 8 字节记录槽。
-        if size > 4056:
+        if size > max_size:
             _error("ROW_TOO_LARGE", "目录记录无法放入一张空数据页", "persist_and_register",
-                   encoded_size=size, max_size=4056)
+                   encoded_size=size, max_size=max_size)
 
 
 def _load_catalog(storage: StorageEngine) -> Catalog:
@@ -150,7 +153,7 @@ def _catalog_context(operation: str, **details):
     try:
         yield
     except Exception as error:
-        # 不为了给异常补信息而导入缺失的 errors.py，防止掩盖原来的失败。
+        # 原样传播底层错误，只为有上下文字典的异常补充目录信息。
         context = getattr(error, "context", None)
         if isinstance(context, dict):
             context.setdefault("operation", operation)

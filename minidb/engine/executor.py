@@ -2,7 +2,7 @@
 
 这里仍把扫描结果收集到内存中，保留原来的简单执行方式。
 表达式求值尚未实现；本文件只预留调用，不补写 expression_eval 的功能。
-源码位置、公共错误、RowCodec、真实页存储仍由对应模块提供。
+源码位置、RowCodec、真实记录页存储仍待对应模块提供。
 """
 
 from __future__ import annotations

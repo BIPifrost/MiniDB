@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from minidb.core.disk_types import CATALOG_ROOT_PAGE_ID
 from minidb.core.schema import (
     SYSTEM_CATALOG_NAME,
     SYSTEM_CATALOG_SCHEMA,
@@ -16,7 +17,7 @@ from minidb.core.schema import (
 
 # 启动阶段直接引用此对象。它描述目录的结构，不初始化或读取 page 1。
 SYSTEM_CATALOG_TABLE = TableDef(
-    ref=TableRef(table_id=0, name=SYSTEM_CATALOG_NAME, root_page_id=1),
+    ref=TableRef(table_id=0, name=SYSTEM_CATALOG_NAME, root_page_id=CATALOG_ROOT_PAGE_ID),
     schema=SYSTEM_CATALOG_SCHEMA,
 )
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
 from minidb.catalog.catalog import Catalog
+from minidb.core.disk_types import FIRST_ALLOCATABLE_PAGE_ID, MAX_PAGE_ID
 from minidb.core.schema import (
     SYSTEM_CATALOG_SCHEMA,
     ColumnDef,
@@ -22,8 +23,7 @@ from minidb.core.schema import (
 )
 
 if TYPE_CHECKING:
-    # 只供编辑器/类型检查器理解注解；运行时不导入尚未提供的 Row 定义。
-    # 配合 annotations 延迟注解，可先独立运行当前目录转换功能。
+    # Row 的正式定义已提供；这里只用作类型注解，无需增加运行时导入。
     from minidb.core.records import Row
 
 
@@ -160,7 +160,7 @@ def _validate_row(row: Row, row_number: int) -> None:
 
     ranges = (
         ("table_id", row[0], 1, 0xFFFFFFFE),
-        ("root_page_id", row[2], 2, 0xFFFFFFFE),
+        ("root_page_id", row[2], FIRST_ALLOCATABLE_PAGE_ID, MAX_PAGE_ID),
         ("column_count", row[3], 1, 64),
         ("column_index", row[4], 0, row[3] - 1),
     )
@@ -202,7 +202,7 @@ def _diagnostic_value(value: object) -> object:
 def _corrupted(
     field: str, reason: str, expected: object, actual: object, *, table_id: int | None = None
 ) -> NoReturn:
-    # 公共错误模块由赵凯航提供；不在本模块定义替代 DbError。
+    # 直接使用公共错误类型，与文件读取和页校验的异常保持一致。
     """报告目录记录损坏，附具体字段和已知表号，保留 JSON 可表示的上下文。"""
     from minidb.core.errors import CATALOG_CORRUPTED, DbError, ErrorStage
 

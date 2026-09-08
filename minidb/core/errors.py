@@ -1,0 +1,89 @@
+"""公共错误接口：从队友已有的 storage/_errors.py 移入，沿用原有实现。
+
+Schema、编译器、目录和文件存储统一引用这里的 DbError、ErrorStage 和错误码，
+使各层抛出和捕获的是同一种异常。源码位置类型仍等待 core/source.py 提供。
+"""
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class ErrorStage(Enum):
+    """错误发生的阶段；向上传递时保留原阶段，不按调用者重新分类。"""
+    LEXICAL = "LEXICAL"
+    SYNTAX = "SYNTAX"
+    SEMANTIC = "SEMANTIC"
+    PLAN = "PLAN"
+    EXECUTION = "EXECUTION"
+    STORAGE = "STORAGE"
+
+
+@dataclass(eq=False)
+class DbError(Exception):
+    """保存阶段、错误码、说明、源码位置和上下文，参数顺序保持已有约定。"""
+    stage: ErrorStage
+    code: str
+    message: str
+    span: Any = None  # 后续接入正式 SourceSpan；文件、页错误通常没有 SQL 位置。
+    context: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """复制上下文，避免不同错误对象共享可变字典；初始化标准异常消息。"""
+        self.context = deepcopy(self.context)
+        Exception.__init__(self, self.message)
+
+    def __str__(self) -> str:
+        """给人阅读的错误文本；程序判断错误时应使用 stage 和 code。"""
+        return f"[{self.stage.name}/{self.code}] {self.message}"
+
+
+# 工作计划 15.12 节已有的错误码；本次移动保留所有名称和值。
+INPUT_INVALID_UTF8 = "INPUT_INVALID_UTF8"
+INPUT_READ_FAILED = "INPUT_READ_FAILED"
+INVALID_CHARACTER = "INVALID_CHARACTER"
+UNTERMINATED_STRING = "UNTERMINATED_STRING"
+UNTERMINATED_COMMENT = "UNTERMINATED_COMMENT"
+INVALID_NUMBER = "INVALID_NUMBER"
+IDENTIFIER_TOO_LONG = "IDENTIFIER_TOO_LONG"
+UNEXPECTED_TOKEN = "UNEXPECTED_TOKEN"
+UNEXPECTED_EOF = "UNEXPECTED_EOF"
+UNSUPPORTED_FEATURE = "UNSUPPORTED_FEATURE"
+INT_OUT_OF_RANGE = "INT_OUT_OF_RANGE"
+TABLE_EXISTS = "TABLE_EXISTS"
+TABLE_NOT_FOUND = "TABLE_NOT_FOUND"
+COLUMN_NOT_FOUND = "COLUMN_NOT_FOUND"
+DUPLICATE_COLUMN = "DUPLICATE_COLUMN"
+DUPLICATE_INSERT_COLUMN = "DUPLICATE_INSERT_COLUMN"
+INSERT_COLUMN_SET_MISMATCH = "INSERT_COLUMN_SET_MISMATCH"
+VALUE_COUNT_MISMATCH = "VALUE_COUNT_MISMATCH"
+RESERVED_NAME = "RESERVED_NAME"
+TYPE_MISMATCH = "TYPE_MISMATCH"
+UNSUPPORTED_COMPARISON = "UNSUPPORTED_COMPARISON"
+CONDITION_NOT_BOOL = "CONDITION_NOT_BOOL"
+INVALID_PLAN = "INVALID_PLAN"
+ROW_TYPE_MISMATCH = "ROW_TYPE_MISMATCH"
+ROW_VALUE_COUNT_MISMATCH = "ROW_VALUE_COUNT_MISMATCH"
+ROW_TOO_LARGE = "ROW_TOO_LARGE"
+ROW_CORRUPTED = "ROW_CORRUPTED"
+ROW_ENCODING_ERROR = "ROW_ENCODING_ERROR"
+PAGE_ID_INVALID = "PAGE_ID_INVALID"
+PAGE_NOT_ALLOCATED = "PAGE_NOT_ALLOCATED"
+PAGE_ALREADY_FREE = "PAGE_ALREADY_FREE"
+RESERVED_PAGE = "RESERVED_PAGE"
+SLOT_ID_INVALID = "SLOT_ID_INVALID"
+PAGE_CORRUPTED = "PAGE_CORRUPTED"
+DB_FORMAT_MISMATCH = "DB_FORMAT_MISMATCH"
+DB_FILE_TRUNCATED = "DB_FILE_TRUNCATED"
+CATALOG_CORRUPTED = "CATALOG_CORRUPTED"
+ID_EXHAUSTED = "ID_EXHAUSTED"
+IO_OPEN_FAILED = "IO_OPEN_FAILED"
+IO_READ_FAILED = "IO_READ_FAILED"
+IO_WRITE_FAILED = "IO_WRITE_FAILED"
+IO_SYNC_FAILED = "IO_SYNC_FAILED"
+IO_CLOSE_FAILED = "IO_CLOSE_FAILED"
+ACTIVE_SCAN = "ACTIVE_SCAN"
+CLOSED = "CLOSED"
+INVALID_ARGUMENT = "INVALID_ARGUMENT"
+INTERNAL_ERROR = "INTERNAL_ERROR"

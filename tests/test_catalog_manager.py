@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.catalog.catalog_manager import CatalogManager
+from minidb.core.errors import DbError, ErrorStage, IO_READ_FAILED, IO_CLOSE_FAILED
 from minidb.core.schema import ColumnDef, DataType, Schema, TableDef, TableRef
 
 
@@ -91,6 +92,27 @@ class CatalogManagerTests(unittest.TestCase):
         with self.assertRaises(OSError) as raised:
             CatalogManager.bootstrap_or_load(self.storage, False)
         self.assertIs(raised.exception, original)
+        self.scan.close.assert_called_once_with()
+
+    def test_shared_storage_errors_keep_identity_and_cleanup_details(self):
+        """接通同一套错误类型后，目录保留底层主错误，并附带关闭错误的信息。"""
+        original = DbError(ErrorStage.STORAGE, IO_READ_FAILED, "读取失败",
+                           context={"operation": "read_page", "page_id": 1})
+        cleanup = DbError(ErrorStage.STORAGE, IO_CLOSE_FAILED, "关闭失败",
+                          context={"operation": "close"})
+        self.scan.__iter__.side_effect = original
+        self.scan.close.side_effect = cleanup
+        with self.assertRaises(DbError) as raised:
+            CatalogManager.bootstrap_or_load(self.storage, False)
+        self.assertIs(raised.exception, original)
+        self.assertEqual(original.code, IO_READ_FAILED)
+        self.assertIs(original.stage, ErrorStage.STORAGE)
+        self.assertEqual(original.context["operation"], "read_page")
+        self.assertEqual(original.context["table_name"], "_sys_catalog")
+        self.assertEqual(original.context["cleanup_errors"], [{
+            "stage": "STORAGE", "code": IO_CLOSE_FAILED, "message": "关闭失败",
+            "span": None, "context": {"operation": "close"},
+        }])
         self.scan.close.assert_called_once_with()
 
     def test_register_publishes_only_after_every_insert(self):

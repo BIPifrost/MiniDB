@@ -15,6 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from minidb.core.disk_types import (
+    FIRST_ALLOCATABLE_PAGE_ID, MAX_PAGE_ID, CATALOG_ROOT_PAGE_ID,
+)
 from minidb.core.records import Row, RowId, RowScan, StoredRow
 from minidb.storage.storage_engine import StorageEngine
 
@@ -71,11 +74,11 @@ class InMemoryStorageEngine(StorageEngine):
     the page-backed implementation and its integration tests.
     """
 
-    def __init__(self, *, first_user_page_id: int = 2) -> None:
+    def __init__(self, *, first_user_page_id: int = FIRST_ALLOCATABLE_PAGE_ID) -> None:
         if (
             isinstance(first_user_page_id, bool)
             or not isinstance(first_user_page_id, int)
-            or not 2 <= first_user_page_id <= 0xFFFFFFFE
+            or not FIRST_ALLOCATABLE_PAGE_ID <= first_user_page_id <= MAX_PAGE_ID
         ):
             raise ValueError("first_user_page_id must be a valid user page id")
         self._next_page_id = first_user_page_id
@@ -102,7 +105,7 @@ class InMemoryStorageEngine(StorageEngine):
         self._validate_table_id(table_id, allow_catalog=False)
         if table_id in self._heaps:
             raise ValueError(f"heap already exists for table_id {table_id}")
-        if self._next_page_id > 0xFFFFFFFE:
+        if self._next_page_id > MAX_PAGE_ID:
             raise OverflowError("page id limit reached")
 
         root_page_id = self._next_page_id
@@ -113,11 +116,11 @@ class InMemoryStorageEngine(StorageEngine):
     def initialize_reserved_heap(self, table: Any) -> None:
         self._require_mutable("initialize_reserved_heap")
         table_id, root_page_id = self._table_identity(table)
-        if table_id != 0 or root_page_id != 1:
+        if table_id != 0 or root_page_id != CATALOG_ROOT_PAGE_ID:
             raise ValueError("the reserved catalog heap must be table 0 on page 1")
         if table_id in self._heaps:
             raise ValueError("the reserved catalog heap is already initialized")
-        self._heaps[0] = _Heap(table_id=0, root_page_id=1)
+        self._heaps[0] = _Heap(table_id=0, root_page_id=CATALOG_ROOT_PAGE_ID)
 
     def validate_table_root(self, table: Any) -> None:
         self._require_open("validate_table_root")
@@ -232,7 +235,7 @@ class InMemoryStorageEngine(StorageEngine):
         if (
             isinstance(root_page_id, bool)
             or not isinstance(root_page_id, int)
-            or not 1 <= root_page_id <= 0xFFFFFFFE
+            or not CATALOG_ROOT_PAGE_ID <= root_page_id <= MAX_PAGE_ID
         ):
             raise ValueError("root_page_id is outside the supported range")
         return table_id, root_page_id

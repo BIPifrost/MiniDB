@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from typing import Protocol, TypeAlias, runtime_checkable
 
 
+from minidb.core.disk_types import CATALOG_ROOT_PAGE_ID, MAX_PAGE_ID
+
+
 Row: TypeAlias = tuple[int | str, ...]
 
 
@@ -31,7 +34,7 @@ class RowId:
     def __post_init__(self) -> None:
         if isinstance(self.page_id, bool) or not isinstance(self.page_id, int):
             raise TypeError("page_id must be an int")
-        if not 1 <= self.page_id <= 0xFFFFFFFE:
+        if not CATALOG_ROOT_PAGE_ID <= self.page_id <= MAX_PAGE_ID:
             raise ValueError("page_id must identify a data or catalog page")
         if isinstance(self.slot_id, bool) or not isinstance(self.slot_id, int):
             raise TypeError("slot_id must be an int")
