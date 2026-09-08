@@ -1,0 +1,13 @@
+{
+  "specification": "MiniDB v1.1 section 8.5 and section 17.2",
+  "schema": [
+    {"name": "id", "data_type": "INT"},
+    {"name": "name", "data_type": "VARCHAR"}
+  ],
+  "row": [1, "中"],
+  "encoded_hex": "010000000000000003000000e4b8ad",
+  "encoded_size": 15,
+  "int64_min_hex": "0000000000000080",
+  "int64_max_hex": "ffffffffffffff7f",
+  "empty_varchar_length_hex": "00000000"
+}
