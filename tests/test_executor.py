@@ -105,9 +105,19 @@ class ExecutorIntegrationTests(unittest.TestCase):
         plan = CreateTablePlan("course", STUDENT_SCHEMA, self.span)
         self.executor.execute(plan, self.context)
         original_table = self.catalog.find_table("course")
-        with patch.object(self.catalog, "reserve_table_id", wraps=self.catalog.reserve_table_id) as reserve, \
-             patch.object(self.storage, "create_heap", wraps=self.storage.create_heap) as create, \
-             patch.object(self.storage, "insert_row", wraps=self.storage.insert_row) as insert:
+        with patch.object(
+            self.catalog,
+            "reserve_table_id",
+            wraps=self.catalog.reserve_table_id,
+        ) as reserve, patch.object(
+            self.storage,
+            "create_heap",
+            wraps=self.storage.create_heap,
+        ) as create, patch.object(
+            self.storage,
+            "insert_row",
+            wraps=self.storage.insert_row,
+        ) as insert:
             with self.assertRaises(DbError) as raised:
                 self.executor.execute(plan, self.context)
             reserve.assert_not_called()
@@ -151,22 +161,24 @@ class ExecutorIntegrationTests(unittest.TestCase):
         self.assertEqual(self.storage.active_scan_count, 0)
         self.assertEqual(self.storage.sync_count, 0)
 
-    @unittest.skipIf(hasattr(expression_eval, "evaluate"), "正式求值器已提供")
-    def test_missing_evaluator_is_reported_before_scan_even_for_empty_table(self):
-        """空表也不掩盖空白求值模块；SELECT、DELETE 都不能假装过滤成功。"""
-        filtered = self._filtered_scan()
-        for plan in (self._project(child=filtered), DeletePlan(self.table, filtered, self.span)):
-            with self.subTest(plan=type(plan).__name__):
-                with patch.object(self.storage, "scan_rows") as scan:
-                    with self.assertRaisesRegex(NotImplementedError, "expression_eval.evaluate"):
-                        self.executor.execute(plan, self.context)
-                    scan.assert_not_called()
+    def test_formal_evaluator_filters_rows_without_a_mock(self):
+        self._insert_students()
+        result = self.executor.execute(
+            self._project((1,), self._filtered_scan()),
+            self.context,
+        )
+        self.assertEqual(result.rows, [("Alice",)])
+        self.assertEqual(self.storage.active_scan_count, 0)
 
-    def test_filter_passes_bound_expression_and_full_row_to_future_evaluator(self):
+    def test_filter_passes_bound_expression_and_full_row_to_evaluator(self):
         """Mock 只验证约定的参数传递，不作为 WHERE 求值已实现的证据。"""
         self._insert_students()
         filtered = self._filtered_scan()
-        with patch.object(expression_eval, "evaluate", create=True, side_effect=[True, False]) as evaluate:
+        with patch.object(
+            expression_eval,
+            "evaluate",
+            side_effect=[True, False],
+        ) as evaluate:
             result = self.executor.execute(self._project((1,), filtered), self.context)
         self.assertEqual(evaluate.call_args_list, [
             call(filtered.predicate, (1, "Alice", 20)),
@@ -178,12 +190,25 @@ class ExecutorIntegrationTests(unittest.TestCase):
         """预设只选中第二行，确认删除使用其原始位置，而非过滤后的行序号。"""
         self._insert_students()
         filtered = self._filtered_scan()
-        with patch.object(expression_eval, "evaluate", create=True, side_effect=[False, True]), \
-             patch.object(self.storage, "delete_row", wraps=self.storage.delete_row) as delete:
-            result = self.executor.execute(DeletePlan(self.table, filtered, self.span), self.context)
+        with patch.object(
+            expression_eval,
+            "evaluate",
+            side_effect=[False, True],
+        ), patch.object(
+            self.storage,
+            "delete_row",
+            wraps=self.storage.delete_row,
+        ) as delete:
+            result = self.executor.execute(
+                DeletePlan(self.table, filtered, self.span),
+                self.context,
+            )
         delete.assert_called_once_with(self.table, RowId(2, 1))
         self.assertEqual(result.affected_rows, 1)
-        self.assertEqual(self.executor.execute(self._project(), self.context).rows, [(1, "Alice", 20)])
+        self.assertEqual(
+            self.executor.execute(self._project(), self.context).rows,
+            [(1, "Alice", 20)],
+        )
 
     def test_invalid_roots_are_rejected_before_storage(self):
         """复用张振的结构校验，现在直接验证接通后的公共 DbError。"""
@@ -215,7 +240,14 @@ class ExecutorIntegrationTests(unittest.TestCase):
         with patch.object(self.storage, "scan_rows", return_value=broken_scan), \
              patch.object(self.storage, "delete_row") as delete:
             with self.assertRaises(OSError) as raised:
-                self.executor.execute(DeletePlan(self.table, SeqScanPlan(self.table, self.span), self.span), self.context)
+                self.executor.execute(
+                    DeletePlan(
+                        self.table,
+                        SeqScanPlan(self.table, self.span),
+                        self.span,
+                    ),
+                    self.context,
+                )
             delete.assert_not_called()
         self.assertIs(raised.exception, failure)
         broken_scan.close.assert_called_once_with()

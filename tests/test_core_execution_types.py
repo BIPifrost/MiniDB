@@ -65,7 +65,7 @@ class ExecutionTypeTests(unittest.TestCase):
         self.assertIs(context.catalog, catalog)
         self.assertIs(context.storage, storage)
 
-    def test_storage_engine_is_an_interface_until_page_storage_is_ready(self):
+    def test_storage_engine_requires_its_three_runtime_dependencies(self):
         with self.assertRaises(TypeError):
             StorageEngine()
 

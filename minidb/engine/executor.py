@@ -1,8 +1,7 @@
 """把已有执行器接到正式 Plan、CatalogManager 和 StorageEngine 接口。
 
-这里仍把扫描结果收集到内存中，保留原来的简单执行方式。
-表达式求值尚未实现；本文件只预留调用，不补写 expression_eval 的功能。
-源码位置和 RowCodec 已接入，真实记录页存储仍待对应模块提供。
+这里仍把扫描结果收集到内存中，保留适合教学项目规模的简单执行方式。
+表达式求值、正式 RowCodec 和页式 StorageEngine 均通过各自稳定接口接入。
 """
 
 from __future__ import annotations
@@ -87,16 +86,13 @@ class Executor:
                 primary_error.add_note(f"关闭扫描时又发生异常：{cleanup_error}")
 
     def _execute_filter(self, plan: FilterPlan, context: ExecutionContext) -> list[ExecRecord]:
-        """沿用已有过滤循环，只把可调用条件替换成正式表达式求值接口。"""
-        # 工作计划已约定周升荣提供：
-        # evaluate(expr: BoundExpr, row: Row) -> int | str | bool。
-        # Filter 的条件已经过 BOOL 类型校验，求值时传完整原行，保留其 RowId。
-        evaluate = getattr(expression_eval, "evaluate", None)
-        if evaluate is None:
-            # 即使表为空也先提示缺少实现，不能误报 WHERE 已经可用。
-            raise NotImplementedError("WHERE 等待 expression_eval.evaluate(expr, row) 实现")
+        """对完整原行求条件值，同时保留删除阶段需要的 RowId。"""
         records = self._execute_stream(plan.child, context)
-        return [record for record in records if evaluate(plan.predicate, record.values)]
+        return [
+            record
+            for record in records
+            if expression_eval.evaluate(plan.predicate, record.values)
+        ]
 
     def _execute_stream(
         self, plan: SeqScanPlan | FilterPlan, context: ExecutionContext

@@ -1,9 +1,9 @@
 """TEST-ONLY implementation of the stable public StorageEngine contract.
 
 This is not temporary because its method signatures are incomplete; it fully
-implements the P0 interface.  It is temporary only as a substitute for the
-page-backed runtime implementation while Zhao Kaihang's RowCodec and Liao
-Jie's BufferPool/FileManager are unavailable.
+implements the P0 interface. The formal page-backed StorageEngine, RowCodec,
+BufferPool and FileManager now exist; this fake remains only for fast Executor
+unit tests that do not need to exercise page layout or disk persistence.
 
 Keep this test double after integration if it remains useful for fast unit
 tests, but never select it from the CLI or claim persistence based on it.

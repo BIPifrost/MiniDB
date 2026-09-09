@@ -1,9 +1,7 @@
-"""STABLE P0 CONTRACT: dependencies assembled for one executor session.
+"""同一次执行会话使用的目录与存储依赖。
 
-Other modules may depend on ``ExecutionContext`` now.  Its field names are
-fixed by the work plan.  The referenced concrete classes are teammate-owned:
-Zhang Zhen supplies ``CatalogManager`` and Zhou Shengrong supplies the
-``StorageEngine`` contract and final implementation.
+``ExecutionContext`` 只是一个装配容器：Session 创建它，Executor 使用它。
+这里不打开数据库、不初始化目录，也不在构造时执行同步或关闭操作。
 """
 
 from __future__ import annotations
@@ -11,9 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-# These imports are intentionally type-checking-only.  The teammate-owned
-# modules may not exist in an early checkout, and importing context at runtime
-# must not initialize a catalog or open a database file.
+# 类型只用于静态检查，运行时不导入具体模块，避免仅导入 context 就触发
+# Catalog 或 Storage 模块的额外初始化，也可以减少不必要的循环导入。
 if TYPE_CHECKING:
     from minidb.catalog.catalog_manager import CatalogManager
     from minidb.storage.storage_engine import StorageEngine
