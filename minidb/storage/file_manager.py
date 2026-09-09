@@ -1,4 +1,4 @@
-"""Physical file I/O for MiniDB format 1 (allocation/release not implemented yet).
+"""Physical file I/O and page allocation for MiniDB format 1.
 
 Ordinary business page access must go through the future BufferPool. This
 layer owns page 0 and free-list metadata. It does not validate DataPage slots.
@@ -12,6 +12,7 @@ from typing import BinaryIO
 from minidb.core.disk_types import PAGE_SIZE, MAX_PAGE_ID, INVALID_PAGE_ID
 from minidb.storage.page import (
     FileHeader, initial_file_header_page, decode_file_header, decode_free_page,
+    encode_file_header, encode_free_page,
 )
 # 使用已移到公共目录的同一套错误定义，目录层可以直接识别底层异常。
 from minidb.core import errors
@@ -170,6 +171,56 @@ class FileManager:
                               expected='4096 bytes', actual=(len(data) if type(data) is bytes else type(data).__name__))
         self.validate_page_id(page_id)
         self._write_raw(page_id, data)
+
+    def allocate_page(self) -> int:
+        """复用空闲链头，否则追加全零页；成功后发布新的内存元数据。
+
+        不自动 fsync，由上层在完整写语句完成后同步。任何 I/O 失败都
+        必须由上层终止会话；本期不保证多页写入失败时的原子回滚。
+        """
+        self._ensure_open('allocate_page')
+        old = self._header
+        if old.free_head != INVALID_PAGE_ID:
+            page_id = old.free_head
+            if page_id not in self._free_pages:
+                raise self._error(errors.DB_FORMAT_MISMATCH, 'allocate_page',
+                                  field='free_head', page_id=page_id,
+                                  expected='member of free page set', actual=page_id)
+            try:
+                successor = decode_free_page(self._read_raw(page_id), page_id=page_id,
+                                             next_page_id=old.next_page_id)
+            except errors.DbError as exc:
+                exc._update_context(path=self._path)
+                raise
+            if successor != INVALID_PAGE_ID and successor not in self._free_pages:
+                raise self._error(errors.DB_FORMAT_MISMATCH, 'allocate_page',
+                                  field='next_free_page_id', page_id=page_id,
+                                  expected='free page or sentinel', actual=successor)
+            updated = FileHeader(old.next_page_id, successor)
+        else:
+            page_id = old.next_page_id
+            if page_id > MAX_PAGE_ID:
+                raise self._error(errors.ID_EXHAUSTED, 'allocate_page',
+                                  id_kind='page', limit=MAX_PAGE_ID)
+            updated = FileHeader(page_id + 1, INVALID_PAGE_ID)
+        header_bytes = encode_file_header(updated)
+        self._write_raw(page_id, bytes(PAGE_SIZE))
+        self._write_raw(0, header_bytes)
+        self._header = updated
+        self._free_pages.discard(page_id)
+        return page_id
+
+    def release_page(self, page_id: int) -> None:
+        """将页加入空闲链头，不截短文件；上层须先摘链并失效缓存。"""
+        self.validate_page_id(page_id, for_release=True)
+        old = self._header
+        free_bytes = encode_free_page(old.free_head, next_page_id=old.next_page_id)
+        updated = FileHeader(old.next_page_id, page_id)
+        header_bytes = encode_file_header(updated)
+        self._write_raw(page_id, free_bytes)
+        self._write_raw(0, header_bytes)
+        self._header = updated
+        self._free_pages.add(page_id)
 
     def sync(self) -> None:
         self._ensure_open('sync')
