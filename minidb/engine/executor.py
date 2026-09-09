@@ -2,7 +2,7 @@
 
 这里仍把扫描结果收集到内存中，保留原来的简单执行方式。
 表达式求值尚未实现；本文件只预留调用，不补写 expression_eval 的功能。
-源码位置、RowCodec、真实记录页存储仍待对应模块提供。
+源码位置和 RowCodec 已接入，真实记录页存储仍待对应模块提供。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from minidb.compiler.plan import (
     SeqScanPlan,
     validate_plan,
 )
+from minidb.core.errors import DbError, ErrorStage, TABLE_EXISTS
 from minidb.core.result import ExecRecord, QueryResult
 from minidb.core.schema import TableDef, TableRef
 
@@ -30,7 +31,6 @@ class Executor:
     def execute(self, plan: Plan, context: ExecutionContext) -> QueryResult:
         """执行完整语句；内部扫描和过滤节点不能单独作为公开入口。"""
         # 复用已有校验，不在执行器重复定义一套计划规则。
-        # validate_plan 的源码位置检查仍依赖待提供的 core/source.py。
         validate_plan(plan)
         if isinstance(plan, CreateTablePlan):
             return self._execute_create_table(plan, context)
@@ -45,11 +45,18 @@ class Executor:
     def _execute_create_table(
         self, plan: CreateTablePlan, context: ExecutionContext
     ) -> QueryResult:
-        """先领表号，再创建根页，最后把完整表定义交给目录登记。"""
+        """先复核表名，再领表号、创建根页，最后交给目录登记。"""
+        # 计划生成后目录可能已有同名表，例如同一计划被重复执行。
+        # 调用张振已有的查询接口提前拒绝，避免到登记时才报错、留下多分配的页。
+        if context.catalog.find_table(plan.table_name) is not None:
+            raise DbError(
+                ErrorStage.SEMANTIC, TABLE_EXISTS, "表名已经登记", plan.span,
+                {"operation": "Executor.execute", "table_name": plan.table_name},
+            )
         table_id = context.catalog.reserve_table_id()
         root_page_id = context.storage.create_heap(table_id)
         table = TableDef(TableRef(table_id, plan.table_name, root_page_id), plan.schema)
-        # 沿用已有目录持久化方法；其 RowCodec 依赖缺失时会报错，不跳过预检。
+        # 沿用已有目录持久化方法，由它调用 RowCodec 完成全部目录行预检。
         context.catalog.persist_and_register(table)
         # 写入后的 sync 由 Session 统一调用，与 CatalogManager 的约定一致。
         return QueryResult(affected_rows=0, message="CREATE TABLE OK")

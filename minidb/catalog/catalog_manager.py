@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, NoReturn
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows
 from minidb.core.disk_types import PAGE_SIZE
+from minidb.core.errors import CATALOG_CORRUPTED, DbError
 from minidb.core.schema import TableDef
 from minidb.storage.data_page import DATA_PAGE_HEADER_SIZE, RECORD_SLOT_SIZE
 
@@ -131,12 +132,31 @@ def _load_catalog(storage: StorageEngine) -> Catalog:
     """从 StoredRow.values 恢复目录，并在所有路径上关闭扫描资源。"""
     scan = storage.scan_rows(SYSTEM_CATALOG_TABLE)
     primary_error = None
+    current_row_id = None
+
+    def catalog_values():
+        """逐行交出目录值，仅在当前行接受校验期间保留它的物理位置。"""
+        nonlocal current_row_id
+        for record in scan:
+            current_row_id = record.row_id
+            # yield 在这里暂停，catalog_from_rows 随即检查这一行。
+            # 如果校验失败，外层 except 仍能拿到对应的页号和槽号。
+            yield record.values
+            # 当前行通过后再清空位置，避免后续读取失败或整表缺列时误标上一行。
+            current_row_id = None
+
     try:
         # catalog_from_rows 已实现七字段检查、分组、缺列检查和列序恢复。
-        return catalog_from_rows(record.values for record in scan)
+        return catalog_from_rows(catalog_values())
     except BaseException as error:
         # 保留第一次失败；包括用户中断时也必须释放活动扫描。
         primary_error = error
+        if (isinstance(error, DbError) and error.code == CATALOG_CORRUPTED
+                and current_row_id is not None and "row_id" not in error.context):
+            # 即使 table_id 本身损坏，也能定位目录记录；上下文只保存 JSON 基本值。
+            error._update_context(row_id={
+                "page_id": current_row_id.page_id, "slot_id": current_row_id.slot_id,
+            })
         raise
     finally:
         try:
@@ -152,41 +172,28 @@ def _catalog_context(operation: str, **details):
     """为底层 DbError 补目录上下文，保留原 code、stage 和异常对象。"""
     try:
         yield
-    except Exception as error:
-        # 原样传播底层错误，只为有上下文字典的异常补充目录信息。
-        context = getattr(error, "context", None)
+    except DbError as error:
         # 目录上下文默认使用系统目录名，但不能覆盖调用方传入的用户表名。
         # 否则用户表根页校验失败时，错误会被误报为 _sys_catalog 损坏，
         # 导致上层无法准确定位实际出错的表。
         updates = {"operation": operation, **details}
         updates.setdefault("table_name", SYSTEM_CATALOG_TABLE.ref.name)
-        if hasattr(error, "_update_context"):
-            missing = {key: value for key, value in updates.items() if key not in context}
-            error._update_context(**missing)
-        elif isinstance(context, dict):
-            for key, value in updates.items():
-                context.setdefault(key, value)
+        # 公共错误上下文只读，通过正式补充接口保留底层已提供的字段。
+        missing = {key: value for key, value in updates.items() if key not in error.context}
+        error._update_context(**missing)
         raise
 
 
 def _record_cleanup_error(primary: BaseException, cleanup: Exception) -> None:
     """读取失败和 close 同时失败时，保留主错误并附上清理失败信息。"""
-    context = getattr(primary, "context", None)
     # 正式接口的 close 错误应为无 SQL 位置的 DbError，可写入规划要求的数组。
-    if hasattr(primary, "_update_context") and all(hasattr(cleanup, key) for key in ("stage", "code", "message", "context")):
-        primary._update_context(cleanup_errors=[*context.get("cleanup_errors", ()), {
+    if isinstance(primary, DbError) and isinstance(cleanup, DbError):
+        primary._update_context(cleanup_errors=[*primary.context.get("cleanup_errors", ()), {
             "stage": cleanup.stage.name,
             "code": cleanup.code,
             "message": cleanup.message,
             "context": cleanup.context,
         }])
-    elif isinstance(context, dict) and all(hasattr(cleanup, key) for key in ("stage", "code", "message", "context")):
-        context.setdefault("cleanup_errors", []).append({
-            "stage": cleanup.stage.name,
-            "code": cleanup.code,
-            "message": cleanup.message,
-            "context": cleanup.context,
-        })
     else:
         # 未预期的编程异常仍交给会话处理；Python 3.11 的 note 保存第二个原因。
         primary.add_note(f"关闭目录扫描时又发生 {type(cleanup).__name__}: {cleanup}")

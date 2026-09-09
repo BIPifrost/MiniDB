@@ -185,6 +185,15 @@ ERROR_STAGE_BY_CODE: dict[str, ErrorStage] = {
 }
 
 
+# 张振接口对接：计划 15.12 要求手工 AST 和目录登记再次检查这些错误。
+# 保留上表的默认阶段，仅允许规范明确需要的复核阶段；其余组合仍拒绝。
+_RECHECK_STAGES_BY_CODE = {
+    IDENTIFIER_TOO_LONG: ErrorStage.SEMANTIC,
+    UNSUPPORTED_FEATURE: ErrorStage.SEMANTIC,
+    TABLE_EXISTS: ErrorStage.STORAGE,
+}
+
+
 class _FrozenDict(dict):
     """JSON-compatible dict whose mutating operations are disabled."""
 
@@ -279,9 +288,14 @@ class DbError(Exception):
                 f"DbError.code '{self.code}' 不是工作计划第 15.12 节定义的错误码"
             )
         expected_stage = ERROR_STAGE_BY_CODE.get(self.code)
-        if expected_stage is not None and self.stage is not expected_stage:
+        recheck_stage = _RECHECK_STAGES_BY_CODE.get(self.code)
+        if (expected_stage is not None
+                and self.stage is not expected_stage and self.stage is not recheck_stage):
+            allowed = expected_stage.name
+            if recheck_stage is not None:
+                allowed += f" 或 {recheck_stage.name}"
             raise ValueError(
-                f"错误码 {self.code} 必须使用 {expected_stage.name} 阶段，"
+                f"错误码 {self.code} 必须使用 {allowed} 阶段，"
                 f"实际为 {self.stage.name}"
             )
         if type(self.message) is not str:

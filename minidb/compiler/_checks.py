@@ -30,11 +30,15 @@ class Check:
             for key, minimum in (("line", 1), ("column", 1), ("offset", 0)):
                 number = getattr(pos, key)
                 self.require(type(number) is int and number >= minimum, f"{field}.{name}.{key}", f"int >= {minimum}", number)
-        self.require(value.start.offset <= value.end.offset, field, "起点不晚于终点", repr(value))
+        start = (value.start.line, value.start.column, value.start.offset)
+        end = (value.end.line, value.end.column, value.end.offset)
+        self.require(_positions_in_order(start, end), field, "行列顺序与字符偏移一致", repr(value))
         if parent is not None:
+            self.require(isinstance(parent, SourceSpan), field, "SourceSpan 父范围", type(parent).__name__)
             self.require(
                 value.source_name == parent.source_name
-                and parent.start.offset <= value.start.offset <= value.end.offset <= parent.end.offset,
+                and _positions_in_order((parent.start.line, parent.start.column, parent.start.offset), start)
+                and _positions_in_order(end, (parent.end.line, parent.end.column, parent.end.offset)),
                 field, "来自同一输入且位于父节点范围内", repr(value),
             )
 
@@ -82,6 +86,26 @@ class Check:
             self.require(isinstance(output, ResultColumn), "output_columns", "ResultColumn", type(output).__name__)
             column = table.schema.columns[index]
             self.require(output.name == column.name and output.data_type is column.data_type, "output_columns", (column.name, column.data_type.name), repr(output))
+
+
+def _positions_in_order(start: tuple[int, int, int], end: tuple[int, int, int]) -> bool:
+    """比较已经通过整数检查的 (行, 列, 字符偏移)，不依赖源码位置类。"""
+    line_delta = end[0] - start[0]
+    offset_delta = end[2] - start[2]
+    # 行、列均从 1 开始：即使前面的行全部为空，也至少需要这些字符。
+    if any(offset < line + column - 2 for line, column, offset in (start, end)):
+        return False
+    # 第一行前面没有换行和其他行，偏移必须正好等于列号减一。
+    if any(line == 1 and offset != column - 1 for line, column, offset in (start, end)):
+        return False
+    if line_delta < 0 or offset_delta < 0:
+        return False
+    if line_delta == 0:
+        # 中文、表情和制表符都按一个字符计数，不能混用 UTF-8 字节长度。
+        return end[1] - start[1] == offset_delta
+    # 跨行至少经过若干换行及末行已有的字符；CRLF 可以多占一个 offset。
+    # 这里只检查必要条件，精确的原文对应关系仍由 SourceText/Lexer 提供。
+    return offset_delta >= line_delta + end[1] - 1
 
 
 def _contract_error(operation, field, expected, actual, *, plan=False):

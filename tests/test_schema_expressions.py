@@ -1,24 +1,15 @@
-"""张振的模块测试；公共错误模块缺失时，明确跳过错误接口对接测试。"""
+"""张振的 Schema 和表达式类型规则测试，直接验证正式公共错误。"""
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import unittest
 from dataclasses import FrozenInstanceError
 from itertools import product
 
 from minidb.core.expressions import ExprOp, resolve_result_type
+from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
 from minidb.core.schema import ColumnDef, DataType, Schema
-
-
-_HAS_SHARED_ERRORS = importlib.util.find_spec("minidb.core.errors") is not None
-if _HAS_SHARED_ERRORS:
-    from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
-
-needs_shared_errors = unittest.skipUnless(
-    _HAS_SHARED_ERRORS, "等待赵凯航提供 minidb/core/errors.py，未验证公共错误接口"
-)
 
 
 class SchemaTests(unittest.TestCase):
@@ -55,7 +46,6 @@ class SchemaTests(unittest.TestCase):
         """不存在的列返回 None，交给语义分析器补上具体错误位置。"""
         self.assertIsNone(self.schema.find_column("missing_col"))
 
-    @needs_shared_errors
     def test_lookup_rejects_invalid_names_without_trimming(self) -> None:
         """非法名字必须拒绝，不自动删空格来把错误输入变成合法名字。"""
         for name in ("", " id", "id ", "id\n", "student.id", "名字", "1id", "a-b", "x" * 65, None, 1, True):
@@ -69,19 +59,16 @@ class SchemaTests(unittest.TestCase):
                 schema = Schema((ColumnDef(name, DataType.INT),))
                 self.assertEqual(schema.find_column(name.upper()), (0, schema.columns[0]))
 
-    @needs_shared_errors
     def test_column_requires_an_already_normalized_name(self) -> None:
         """ColumnDef 接收的名字必须已经小写。"""
         self.assert_invalid(lambda: ColumnDef("Age", DataType.INT), "ColumnDef")
 
-    @needs_shared_errors
     def test_column_rejects_invalid_names(self) -> None:
         """空名字、中文、点号、数字开头和超长名字不能建列定义。"""
         for name in ("", " age", "中文", "a.b", "1age", "x" * 65, 42):
             with self.subTest(name=name):
                 self.assert_invalid(lambda: ColumnDef(name, DataType.INT), "ColumnDef")
 
-    @needs_shared_errors
     def test_column_type_rejects_bool_and_raw_strings(self) -> None:
         """表列不能使用 BOOL，也不能拿字符串冒充 DataType 枚举。"""
         for data_type in (DataType.BOOL, "INT", "VARCHAR", int, str, bool, True, None):
@@ -96,7 +83,6 @@ class SchemaTests(unittest.TestCase):
                 self.assertEqual(len(schema.columns), count)
                 self.assertEqual(schema.find_column(f"c{count - 1}")[0], count - 1)
 
-    @needs_shared_errors
     def test_invalid_column_counts(self) -> None:
         """0 列和 65 列超出本项目范围。"""
         for count in (0, 65):
@@ -106,7 +92,6 @@ class SchemaTests(unittest.TestCase):
                     "Schema",
                 )
 
-    @needs_shared_errors
     def test_duplicate_column_is_rejected(self) -> None:
         """同一个 Schema 中不允许两列同名。"""
         self.assert_invalid(
@@ -114,7 +99,6 @@ class SchemaTests(unittest.TestCase):
             "Schema",
         )
 
-    @needs_shared_errors
     def test_schema_rejects_mutable_sequence_and_wrong_elements(self) -> None:
         """Schema 只接受由 ColumnDef 组成的元组。"""
         for columns in (list(self.schema.columns), None, ("id",), (None,)):
@@ -160,7 +144,6 @@ class ExpressionTypeTests(unittest.TestCase):
             with self.subTest(op=op):
                 self.assertIsNone(resolve_result_type(op, (DataType.INT,) * 4))
 
-    @needs_shared_errors
     def test_invalid_api_arguments_are_plan_errors(self) -> None:
         """类型规则函数的编程参数错误使用 PLAN 阶段。"""
         cases = (

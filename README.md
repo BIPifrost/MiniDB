@@ -1,20 +1,14 @@
 # MiniDB
 
-《大型平台软件设计实习》的 Python 数据库项目，依据实习指导书 PDF、两份 PPT 和《实训工作计划 v1.1》。术语说明见《专业名词入门解释》。这些参考资料保留在本地开发目录的上一级，未包含在本仓库中。
+《大型平台软件设计实习》的 Python 数据库项目，依据实习指导书、PPT 和《实训工作计划》。参考资料保留在本地开发目录的上一级，未包含在本仓库中。
 
-当前在初始化骨架上继续开发张振负责的模块：表结构、表达式类型规则、内存目录、目录行转换、Bound/Plan、Semantic、Planner 和 CatalogManager。张振部分的源码、演示和测试已补中文注释。
-
-远程提交 4d52cae 已提供 Row/RowScan、结果类型、ExecutionContext、StorageEngine 抽象接口及测试专用内存存储。现有执行器已改用张振的正式 Plan 和表定义：建表调用目录登记接口，插入使用已绑定的行，投影使用列序号，删除先关闭扫描再按 RowId 逐行删除。原有临时类型 `_scaffold.py` 已移除，修改处已补中文注释。
-
-远程提交 5b038ad 新增公共磁盘常量、文件头及空闲页编解码、FileManager 文件读写和 LRU/FIFO 排序工具。队友已有的 `storage/_errors.py` 已移到 `core/errors.py`，保留原实现，目录、编译器和文件存储统一引用；表定义和目录检查也已改用公共页常量。
-
-本次只对接已有代码。`expression_eval.py` 仍未实现，仅在过滤入口预留 `evaluate(expr, row)` 调用；源码位置、Token、AST、RowCodec、BufferPool、页分配/回收和真实记录存储仍待对应成员提供。执行器的计划校验还依赖源码位置类型，建表目录预检还依赖 RowCodec，当前不能独立跑通完整执行流程。CLI 保持初始化入口，不能直接执行 SQL。底层文件读写已通过测试，完整数据库的持久化仍未验证。写入后的同步统一由后续 Session 调度。
+张振负责 Schema、表达式类型规则、CatalogRead、Semantic、Bound/Plan、Planner、系统目录与 CatalogManager。源码、样例和测试附有中文注释。当前已接入队友提供的 Lexer、Parser、AST、SourceSpan、公共错误、RowCodec、行与结果类型和存储接口。
 
 ## 运行
 
-使用 Python 3.11 或以上，仅依赖标准库，无需安装第三方包。本次验证环境：Windows，Python 3.12.7（conda-forge）。源码和文档使用 UTF-8，源码使用 LF 换行。
+使用 Python 3.11 或以上，仅依赖标准库。本次验证环境为 Windows、Python 3.12.7。源码和文档使用 UTF-8，源码使用 LF 换行。
 
-先进入 `MiniDB` 文件夹，再运行：
+在项目根目录运行：
 
 ```powershell
 python -m minidb
@@ -22,38 +16,46 @@ python -m minidb --help
 python -m minidb --db data/demo.db
 ```
 
-程序显示初始化说明后退出。`--db` 目前仅接收并显示预留路径，不创建、打开或修改数据库文件。其他规划中的参数待对应功能实现后加入。
+CLI 目前显示初始化说明后退出；`--db` 仅接收并显示路径，不打开数据库或执行 SQL。
 
-## 目录
+## 目录与分工
 
 ```text
 MiniDB/
-├── README.md
 ├── minidb/
-│   ├── __init__.py
-│   ├── __main__.py       # python -m minidb 的入口
-│   ├── cli/main.py       # 启动参数和提示
-│   ├── core/             # 表、表达式、目录协议、行与结果、页常量及公共错误
-│   ├── compiler/         # 张振的语义与计划；词法、语法、优化待接入
-│   ├── catalog/          # 内存目录、目录行转换及管理器
-│   ├── storage/          # 文件读写、页格式、替换排序及存储抽象接口
-│   └── engine/           # 执行器已接正式类型；表达式求值待实现
-├── examples/             # SQL 输入样例及可运行的 Schema/目录演示
-├── tests/                # 模块测试、公共接口样例及测试专用存储替身
-└── data/                 # 预留本地数据目录
+│   ├── cli/             # 启动入口
+│   ├── core/            # 表、表达式、目录协议、源码位置、行、结果及错误
+│   ├── compiler/        # 词法、语法、语义、绑定、计划与优化
+│   ├── catalog/         # 内存目录、目录行转换及管理器
+│   ├── storage/         # 文件读写、页格式、行编码及存储接口
+│   └── engine/          # 执行器与执行上下文
+├── examples/            # SQL 样例及 Schema/目录演示
+├── tests/               # 模块测试、共享样例与测试专用存储替身
+└── data/                # 预留本地数据目录
 ```
-
-上图列出项目的主要目录。其余文件按工作计划第 12、17 节逐步添加。
-
-## 后续开发
 
 | 成员 | 主要职责 |
 |---|---|
-| 赵凯航 | 词法、语法、AST、CLI、RowCodec、优化 |
-| 张振 | Schema、语义、绑定、计划、系统目录 |
+| 赵凯航 | 词法、语法、AST、CLI/Session、RowCodec、优化、公共诊断 |
+| 张振 | Schema、表达式类型规则、语义、绑定、计划、系统目录 |
 | 廖杰 | 文件、物理页、页缓存、替换策略 |
-| 周升荣 | 执行器、数据页、记录存储、集成测试 |
+| 周升荣 | 执行器、表达式求值、数据页、记录存储、集成测试 |
 
-下一步由对应成员补齐剩余公共类型、表达式求值、AST、编码和页存储实现，再继续验证完整链路。完整调用顺序为：SQL → Lexer → Parser → Semantic → Planner → Executor → StorageEngine → BufferPool → FileManager；优化器开启时位于 Planner 与 Executor 之间。
+## 张振部分的验证
 
-使用标准库 `unittest`，在项目根目录运行 `python -X utf8 -m unittest discover -s tests -v`。当前工作区 179 项测试中 173 项通过、6 项因 AST、源码位置和 Token 接口未提供而跳过。公共错误已接通，相关校验直接验证真实 DbError；文件存储测试使用临时文件验证读写和重新打开。`tests/test_executor.py` 的 9 项对接测试仍使用现有内存存储替身：缺少源码位置时只隔离位置检查，建表测试隔离编码预检，过滤测试用 Mock 检查参数和 RowId 传递。这些结果不代表缺失模块或完整 SQL 持久化链路已实现。
+```powershell
+python -X utf8 -m unittest discover -s tests -v
+```
+
+当前全部 417 项测试通过，无跳过项。真实 SQL 经 Lexer → Parser → Semantic → Planner 的五组交接样例已通过；建表对接测试使用正式 RowCodec 完成目录行预检。
+
+- 语义与计划：名称、列集合、值类型、INT64 边界、错误顺序、AND/OR 两侧检查、嵌套 NOT、投影顺序、删除目标表及循环引用。
+- 源码位置：字符偏移与行列一致，子节点属于同一输入及父范围；共享表达式每次调用仅校验一次内部字段，每条父子关系仍单独检查。
+- 目录：七字段记录转换、乱序恢复、完整性检查、根页验证、写完再发布、失败后关闭扫描；坏行错误保留页号和槽号，关闭失败不会掩盖原错误。
+- 公共接口：错误上下文通过正式接口补充；手工 AST 的复核保持 SEMANTIC 阶段，目录登记错误保持 STORAGE 阶段；执行器调用目录接口提前拒绝重名表，避免额外分配表号和根页。
+
+共享样例位于 `tests/fixtures/`：`contracts.py` 提供 SQL 和独立手写的预期 Bound/Plan，`semantic_cases.py` 提供正式 AST，`contracts_v1.json` 保存完整固定预期。五个样例为 `create`、`insert`、`select`、`delete`、`select_duplicate`，预期结果不由被测代码生成。
+
+已删除正式接口到位后过时的模块探测、跳过分支、位置替身和重复错误包装逻辑。目录调度测试仍用 Mock 检查失败顺序；执行器测试使用已有内存存储替身，过滤测试的 Mock 只验证参数传递。
+
+表达式求值、BufferPool、页分配/回收、真实记录存储和完整 Session 执行链仍待对应成员完成。现有测试通过不代表完整数据库持久化已验证；写入后的同步由 Session 统一调度。

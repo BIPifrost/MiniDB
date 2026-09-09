@@ -1,6 +1,5 @@
 """目录记录的固定样例、恢复顺序与损坏检测；不模拟页式存储。"""
 
-import importlib.util
 import json
 import unittest
 from itertools import permutations
@@ -9,16 +8,8 @@ from unittest.mock import patch
 from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows
+from minidb.core.errors import CATALOG_CORRUPTED, INVALID_ARGUMENT, DbError, ErrorStage
 from minidb.core.schema import ColumnDef, DataType, Schema, TableDef, TableRef
-
-
-_HAS_SHARED_ERRORS = importlib.util.find_spec("minidb.core.errors") is not None
-if _HAS_SHARED_ERRORS:
-    from minidb.core.errors import CATALOG_CORRUPTED, INVALID_ARGUMENT, DbError, ErrorStage
-
-needs_shared_errors = unittest.skipUnless(
-    _HAS_SHARED_ERRORS, "等待赵凯航提供 minidb/core/errors.py，未验证公共错误接口"
-)
 
 
 def changed(row, index, value):
@@ -26,7 +17,24 @@ def changed(row, index, value):
     return row[:index] + (value,) + row[index + 1:]
 
 
-class CatalogRowsWriteTests(unittest.TestCase):
+class CatalogRowsAssertions(unittest.TestCase):
+    """目录记录的错误使用正式 STORAGE/DbError，不替换报错函数。"""
+    def assert_catalog_error(self, action, code: str, *, operation: str, field: str) -> DbError:
+        """检查错误码、阶段和具体字段，并验证上下文可以直接输出为 JSON。"""
+        with self.assertRaises(DbError) as raised:
+            action()
+        error = raised.exception
+        self.assertEqual(error.code, code)
+        self.assertIs(error.stage, ErrorStage.STORAGE)
+        self.assertIsNone(error.span)
+        self.assertEqual(error.context["operation"], operation)
+        self.assertEqual(error.context["field"], field)
+        self.assertTrue({"expected", "actual"} <= error.context.keys())
+        json.dumps(error.context, ensure_ascii=False, allow_nan=False)
+        return error
+
+
+class CatalogRowsWriteTests(CatalogRowsAssertions):
     """验证表定义如何转换为固定七字段目录行。"""
     def test_student_rows_match_independently_written_fixture(self) -> None:
         """转换结果与独立手写的七字段预期比较，避免自证正确。"""
@@ -61,15 +69,13 @@ class CatalogRowsWriteTests(unittest.TestCase):
         """转换函数只接受普通用户表的正式 TableDef。"""
         for value in (None, {}, STUDENT_SCHEMA, SYSTEM_CATALOG_TABLE):
             with self.subTest(value=value):
-                stop = RuntimeError("停止于目录转换参数拒绝处")
-                with patch("minidb.catalog.catalog_rows._invalid_argument", side_effect=stop) as report:
-                    with self.assertRaises(RuntimeError) as raised:
-                        table_to_catalog_rows(value)
-                self.assertIs(raised.exception, stop)
-                self.assertEqual(report.call_args.args[:2], ("table_to_catalog_rows", "table"))
+                self.assert_catalog_error(
+                    lambda: table_to_catalog_rows(value), INVALID_ARGUMENT,
+                    operation="table_to_catalog_rows", field="table",
+                )
 
 
-class CatalogRowsReadTests(unittest.TestCase):
+class CatalogRowsReadTests(CatalogRowsAssertions):
     """验证完整目录行如何恢复成按 Schema 排序的表定义。"""
     def test_empty_rows_restore_an_empty_user_catalog(self) -> None:
         """没有目录行时恢复为空用户目录。"""
@@ -179,33 +185,33 @@ class CatalogRowsReadTests(unittest.TestCase):
                 closed.append(True)
 
         stream = source()
-        with patch("minidb.catalog.catalog_rows._corrupted", side_effect=RuntimeError("停止")):
-            with self.assertRaises(RuntimeError):
-                catalog_from_rows(stream)
+        self.addCleanup(stream.close)
+        self.assert_catalog_error(
+            lambda: catalog_from_rows(stream), CATALOG_CORRUPTED,
+            operation="catalog_from_rows", field="rows[0].column_count",
+        )
         self.assertEqual(closed, [])
         stream.close()
         self.assertEqual(closed, [True])
 
 
-class CatalogRowsCorruptionTests(unittest.TestCase):
+class CatalogRowsCorruptionTests(CatalogRowsAssertions):
     """逐项破坏目录记录，确认加载器能发现不一致并停止发布结果。"""
     def assert_corrupted(self, rows, field: str):
-        # 只替换本模块的错误出口，验证拒绝行为，不模拟公共 DbError。
         """断言目录行被拒绝，并确认失败时没有发布半个 Catalog。"""
-        stop = RuntimeError("停止于目录损坏报告处")
-        with patch("minidb.catalog.catalog_rows._corrupted", side_effect=stop) as report:
-            with patch("minidb.catalog.catalog_rows.Catalog") as publish:
-                with self.assertRaises(RuntimeError) as raised:
-                    catalog_from_rows(rows)
-        self.assertIs(raised.exception, stop)
-        report.assert_called_once()
-        self.assertEqual(report.call_args.args[0], field)
+        # 只观察快照是否被构造；错误出口和目录校验都执行真实代码。
+        with patch("minidb.catalog.catalog_rows.Catalog", wraps=Catalog) as publish:
+            error = self.assert_catalog_error(
+                lambda: catalog_from_rows(rows), CATALOG_CORRUPTED,
+                operation="catalog_from_rows", field=field,
+            )
+        self.assertIn("reason", error.context)
         publish.assert_not_called()
-        return report.call_args
+        return error
 
     def test_wrong_row_shape_is_rejected(self) -> None:
         """目录行必须是恰好七字段的元组。"""
-        for row in (None, {}, "bad row", (), STUDENT_CATALOG_ROWS[0][:-1], STUDENT_CATALOG_ROWS[0] + (8,), list(STUDENT_CATALOG_ROWS[0])):
+        for row in (None, {}, "bad row", (), (1, None), STUDENT_CATALOG_ROWS[0][:-1], STUDENT_CATALOG_ROWS[0] + (8,), list(STUDENT_CATALOG_ROWS[0])):
             with self.subTest(row=row):
                 self.assert_corrupted((row,), "rows[0]")
 
@@ -260,10 +266,10 @@ class CatalogRowsCorruptionTests(unittest.TestCase):
         for omitted in range(3):
             with self.subTest(omitted=omitted):
                 rows = STUDENT_CATALOG_ROWS[:omitted] + STUDENT_CATALOG_ROWS[omitted + 1:]
-                reported = self.assert_corrupted(rows, "column_index")
-                self.assertEqual(reported.args[2], [0, 1, 2])
-                self.assertEqual(reported.args[3], [i for i in range(3) if i != omitted])
-                self.assertEqual(reported.kwargs["table_id"], 1)
+                error = self.assert_corrupted(rows, "column_index")
+                self.assertEqual(error.context["expected"], [0, 1, 2])
+                self.assertEqual(error.context["actual"], [i for i in range(3) if i != omitted])
+                self.assertEqual(error.context["table_id"], 1)
 
     def test_duplicate_column_index_is_detected_even_for_identical_rows(self) -> None:
         """即使重复行内容相同，也不能重复登记同一列序号。"""
@@ -295,52 +301,22 @@ class CatalogRowsCorruptionTests(unittest.TestCase):
         """后一张表不完整时整次加载失败，不先公布前一张表。"""
         original = Catalog((STUDENT_TABLE,))
         rows = STUDENT_CATALOG_ROWS + ((7, "course", 4, 2, 0, "cid", "INT"),)
-        report = self.assert_corrupted(rows, "column_index")
-        self.assertEqual(report.kwargs["table_id"], 7)
+        error = self.assert_corrupted(rows, "column_index")
+        self.assertEqual(error.context["table_id"], 7)
         self.assertEqual(original.list_tables(), [STUDENT_TABLE])
 
     def test_non_iterable_input_is_an_argument_error(self) -> None:
         """不能迭代的输入属于接口参数错误。"""
         for value in (None, 1, True):
             with self.subTest(value=value):
-                stop = RuntimeError("停止于参数拒绝处")
-                with patch("minidb.catalog.catalog_rows._invalid_argument", side_effect=stop) as report:
-                    with self.assertRaises(RuntimeError) as raised:
-                        catalog_from_rows(value)
-                self.assertIs(raised.exception, stop)
-                self.assertEqual(report.call_args.args[:2], ("catalog_from_rows", "rows"))
+                self.assert_catalog_error(
+                    lambda: catalog_from_rows(value), INVALID_ARGUMENT,
+                    operation="catalog_from_rows", field="rows",
+                )
 
 
-@needs_shared_errors
 class CatalogRowsErrorContractTests(unittest.TestCase):
-    """接入真实 DbError 后检查错误码、阶段和上下文字段。"""
-    def test_corruption_has_storage_stage_and_table_context(self) -> None:
-        """目录损坏应使用 STORAGE 阶段，并携带已知表号。"""
-        with self.assertRaises(DbError) as raised:
-            catalog_from_rows(STUDENT_CATALOG_ROWS[:-1])
-        error = raised.exception
-        self.assertEqual(error.code, CATALOG_CORRUPTED)
-        self.assertIs(error.stage, ErrorStage.STORAGE)
-        self.assertIsNone(error.span)
-        self.assertEqual(error.context["operation"], "catalog_from_rows")
-        self.assertEqual(error.context["table_id"], 1)
-        self.assertEqual(error.context["expected"], [0, 1, 2])
-        self.assertEqual(error.context["actual"], [0, 1])
-        self.assertIn("reason", error.context)
-        json.dumps(error.context, ensure_ascii=False, allow_nan=False)
-
-    def test_argument_errors_use_the_shared_contract(self) -> None:
-        """参数错误采用公共 INVALID_ARGUMENT，context 必须可序列化。"""
-        for call in (lambda: table_to_catalog_rows(SYSTEM_CATALOG_TABLE), lambda: catalog_from_rows(None)):
-            with self.subTest(call=call):
-                with self.assertRaises(DbError) as raised:
-                    call()
-                error = raised.exception
-                self.assertEqual(error.code, INVALID_ARGUMENT)
-                self.assertIs(error.stage, ErrorStage.STORAGE)
-                self.assertIsNone(error.span)
-                json.dumps(error.context, ensure_ascii=False, allow_nan=False)
-
+    """保留常规拒绝测试未覆盖的特殊上下文检查。"""
     def test_malformed_row_context_is_json_safe_without_a_fake_table_id(self) -> None:
         """坏行诊断不伪造表号，也不把循环对象或 NaN 放入 JSON。"""
         circular = []

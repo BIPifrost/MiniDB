@@ -190,12 +190,16 @@ def _validate_row(row: Row, row_number: int) -> None:
 
 
 def _diagnostic_value(value: object) -> object:
-    """错误上下文只保存 JSON 可表示的数据，未知对象记录为文本。"""
-    if value is None or type(value) in (str, int, bool):
+    """错误上下文只保存公共 DbError 接受的数据，其他值记录为文本。
+
+    None 若是实际收到的错误参数，应记录为字符串 "None"；它不是未知信息，
+    不能省略 actual，也不能把不允许的空值传入公共错误接口。
+    """
+    if type(value) in (str, int, bool):
         return value
     if isinstance(value, (tuple, list)):
         # Row 是平坦元组；对不合法的嵌套对象用 repr，避免循环容器递归。
-        return [item if item is None or type(item) in (str, int, bool) else repr(item) for item in value]
+        return [item if type(item) in (str, int, bool) else repr(item) for item in value]
     return repr(value)
 
 
@@ -212,9 +216,7 @@ def _corrupted(
         "reason": reason,
         "expected": _diagnostic_value(expected),
     }
-    actual_value = _diagnostic_value(actual)
-    if actual_value is not None:
-        context["actual"] = actual_value
+    context["actual"] = _diagnostic_value(actual)
     if table_id is not None:
         context["table_id"] = table_id
     raise DbError(ErrorStage.STORAGE, CATALOG_CORRUPTED, reason, None, context)
@@ -229,9 +231,7 @@ def _invalid_argument(operation: str, field: str, expected: str, actual: object)
         "field": field,
         "expected": expected,
     }
-    actual_value = _diagnostic_value(actual)
-    if actual_value is not None:
-        context["actual"] = actual_value
+    context["actual"] = _diagnostic_value(actual)
     raise DbError(
         ErrorStage.STORAGE,
         INVALID_ARGUMENT,

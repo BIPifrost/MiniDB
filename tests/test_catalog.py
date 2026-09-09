@@ -1,14 +1,13 @@
 """张振第二步的表定义、只读目录与固定系统表测试。"""
 
-import importlib.util
 import json
 import unittest
 from dataclasses import FrozenInstanceError
-from unittest.mock import patch
 
 from fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.core.catalog_protocol import CatalogRead
+from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
 from minidb.core.schema import (
     SYSTEM_CATALOG_SCHEMA,
     ColumnDef,
@@ -19,28 +18,21 @@ from minidb.core.schema import (
 )
 
 
-_HAS_SHARED_ERRORS = importlib.util.find_spec("minidb.core.errors") is not None
-if _HAS_SHARED_ERRORS:
-    from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
-
-needs_shared_errors = unittest.skipUnless(
-    _HAS_SHARED_ERRORS, "等待赵凯航提供 minidb/core/errors.py，未验证公共错误接口"
-)
-
-
 class ValidationAssertions(unittest.TestCase):
-    """供目录测试复用的断言：拦截本模块错误出口，不代写公共异常。"""
-    def assert_rejected(self, call, *, target: str, operation: str, field: str) -> None:
-        # 只拦截张振模块自己的错误出口，验证不合法对象不会构造成功。
-        # 不模拟 DbError，也不把该检查当成公共错误类型/阶段的对接验证。
-        """把当前模块的错误出口替换为停止信号，检查错误发生的接口和字段。"""
-        stop = RuntimeError("测试在本模块的参数拒绝处停止")
-        with patch(target, side_effect=stop) as report:
-            with self.assertRaises(RuntimeError) as raised:
-                call()
-        self.assertIs(raised.exception, stop)
-        report.assert_called_once()
-        self.assertEqual(report.call_args.args[:2], (operation, field))
+    """直接检查表定义和内存目录产生的正式参数错误。"""
+    def assert_rejected(self, call, *, operation: str, field: str) -> DbError:
+        """核对真实错误码、阶段、接口和字段，错误上下文必须能转为 JSON。"""
+        with self.assertRaises(DbError) as raised:
+            call()
+        error = raised.exception
+        self.assertEqual(error.code, INVALID_ARGUMENT)
+        self.assertIs(error.stage, ErrorStage.SEMANTIC)
+        self.assertIsNone(error.span)
+        self.assertEqual(error.context["operation"], operation)
+        self.assertEqual(error.context["field"], field)
+        self.assertTrue({"expected", "actual"} <= error.context.keys())
+        json.dumps(error.context, ensure_ascii=False, allow_nan=False)
+        return error
 
 
 class TableDefinitionTests(ValidationAssertions):
@@ -100,7 +92,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(table_id=table_id):
                 self.assert_rejected(
                     lambda: TableRef(table_id, "student", 2),
-                    target="minidb.core.schema._invalid", operation="TableRef", field="table_id",
+                    operation="TableRef", field="table_id",
                 )
 
     def test_invalid_root_ids_are_rejected(self) -> None:
@@ -109,7 +101,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(page_id=page_id):
                 self.assert_rejected(
                     lambda: TableRef(1, "student", page_id),
-                    target="minidb.core.schema._invalid", operation="TableRef", field="root_page_id",
+                    operation="TableRef", field="root_page_id",
                 )
 
     def test_names_must_be_normalized_and_valid(self) -> None:
@@ -118,7 +110,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(name=name):
                 self.assert_rejected(
                     lambda: TableRef(1, name, 2),
-                    target="minidb.core.schema._invalid", operation="TableRef", field="name",
+                    operation="TableRef", field="name",
                 )
         self.assertEqual(TableRef(1, "a" * 64, 2).name, "a" * 64)
 
@@ -134,7 +126,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(table_id=table_id, name=name, root_page_id=root_page_id):
                 self.assert_rejected(
                     lambda: TableRef(table_id, name, root_page_id),
-                    target="minidb.core.schema._invalid", operation="TableRef", field=field,
+                    operation="TableRef", field=field,
                 )
 
     def test_table_definition_requires_formal_ref_and_schema(self) -> None:
@@ -143,7 +135,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(field=field):
                 self.assert_rejected(
                     lambda: TableDef(ref, schema),
-                    target="minidb.core.schema._invalid", operation="TableDef", field=field,
+                    operation="TableDef", field=field,
                 )
 
     def test_system_schema_cannot_be_replaced_reordered_or_retyped(self) -> None:
@@ -159,21 +151,8 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(schema=schema):
                 self.assert_rejected(
                     lambda: TableDef(SYSTEM_CATALOG_TABLE.ref, schema),
-                    target="minidb.core.schema._invalid", operation="TableDef", field="schema",
+                    operation="TableDef", field="schema",
                 )
-
-    @needs_shared_errors
-    def test_table_validation_uses_the_shared_error_contract(self) -> None:
-        """使用真实错误模块验证 TableRef 的参数拒绝接口。"""
-        with self.assertRaises(DbError) as raised:
-            TableRef(True, "student", 2)
-        error = raised.exception
-        self.assertEqual(error.code, INVALID_ARGUMENT)
-        self.assertIs(error.stage, ErrorStage.SEMANTIC)
-        self.assertIsNone(error.span)
-        self.assertEqual(error.context["operation"], "TableRef")
-        self.assertEqual(error.context["field"], "table_id")
-        json.dumps(error.context, ensure_ascii=False)
 
 
 class CatalogTests(ValidationAssertions):
@@ -240,7 +219,7 @@ class CatalogTests(ValidationAssertions):
             with self.subTest(name=name):
                 self.assert_rejected(
                     lambda: self.catalog.find_table(name),
-                    target="minidb.core.schema._invalid", operation="Catalog.find_table", field="name",
+                    operation="Catalog.find_table", field="name",
                 )
 
     def test_constructor_rejects_mutable_inputs_and_invalid_elements(self) -> None:
@@ -249,14 +228,14 @@ class CatalogTests(ValidationAssertions):
             with self.subTest(tables=tables):
                 self.assert_rejected(
                     lambda: Catalog(tables),
-                    target="minidb.catalog.catalog._invalid", operation="Catalog", field=field,
+                    operation="Catalog", field=field,
                 )
 
     def test_constructor_rejects_system_entries(self) -> None:
         """系统目录不能作为普通用户表登记进内存目录。"""
         self.assert_rejected(
             lambda: Catalog((SYSTEM_CATALOG_TABLE,)),
-            target="minidb.catalog.catalog._invalid", operation="Catalog", field="tables[0]",
+            operation="Catalog", field="tables[0]",
         )
 
     def test_constructor_rejects_duplicate_names_ids_and_roots(self) -> None:
@@ -271,28 +250,9 @@ class CatalogTests(ValidationAssertions):
                 other = TableDef(ref, STUDENT_SCHEMA)
                 self.assert_rejected(
                     lambda: Catalog((STUDENT_TABLE, other)),
-                    target="minidb.catalog.catalog._invalid", operation="Catalog", field=f"tables[1].ref.{field}",
+                    operation="Catalog", field=f"tables[1].ref.{field}",
                 )
                 self.assertEqual(self.catalog.list_tables(), [STUDENT_TABLE, self.course])
-
-    @needs_shared_errors
-    def test_catalog_validation_uses_the_shared_error_contract(self) -> None:
-        """接入公共错误后检查 Catalog 错误阶段和字段。"""
-        calls = (
-            (lambda: Catalog((STUDENT_TABLE, STUDENT_TABLE)), "Catalog", "tables[1].ref.name"),
-            (lambda: self.catalog.find_table(" student"), "Catalog.find_table", "name"),
-        )
-        for call, operation, field in calls:
-            with self.subTest(operation=operation):
-                with self.assertRaises(DbError) as raised:
-                    call()
-                error = raised.exception
-                self.assertEqual(error.code, INVALID_ARGUMENT)
-                self.assertIs(error.stage, ErrorStage.SEMANTIC)
-                self.assertIsNone(error.span)
-                self.assertEqual(error.context["operation"], operation)
-                self.assertEqual(error.context["field"], field)
-                json.dumps(error.context, ensure_ascii=False)
 
 
 if __name__ == "__main__":

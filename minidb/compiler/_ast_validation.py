@@ -11,7 +11,6 @@ from minidb.core.schema import DataType
 
 def validate_ast(stmt) -> None:
     """先检查完整结构，再由 Semantic 检查名字和类型的业务含义。"""
-    # 延迟导入：缺少 AST 时其他张振模块仍可导入，但不能假装能分析 SQL。
     from minidb.compiler import ast
 
     check = Check("Semantic.analyze")
@@ -69,15 +68,20 @@ def _expression(expr, parent, check: Check) -> None:
     # leaving=False 表示第一次进入节点，True 表示其子节点已检查完毕。
     pending = [(expr, parent, False)]
     active: set[int] = set()
+    validated: set[int] = set()
     expression_types = (ast.IdentifierExpr, ast.LiteralExpr, ast.UnaryExpr, ast.BinaryExpr)
     while pending:
         node, enclosing, leaving = pending.pop()
         if leaving:
             active.remove(id(node))
+            validated.add(id(node))
             continue
         check.require(isinstance(node, expression_types), "expression", "正式 Expr", type(node).__name__)
         check.require(id(node) not in active, "expression", "无环 AST", type(node).__name__)
         check.span(node.span, "expression.span", enclosing)
+        # 父范围每次都检查；共享子树的内部字段只需在本次调用中检查一次。
+        if id(node) in validated:
+            continue
         if isinstance(node, ast.IdentifierExpr):
             check.require(isinstance(node.name, str), "name", "str", type(node.name).__name__)
         elif isinstance(node, ast.LiteralExpr):
@@ -93,3 +97,5 @@ def _expression(expr, parent, check: Check) -> None:
             children = (node.operand,) if unary else (node.left, node.right)
             # 栈后进先出，所以先放右边，才能按左、右的顺序检查。
             pending.extend((child, node.span, False) for child in reversed(children))
+            continue
+        validated.add(id(node))

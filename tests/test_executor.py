@@ -1,7 +1,7 @@
 """已有执行逻辑的接口对接测试，不替其他成员实现空白模块。
 
 使用正式 Plan、Schema、CatalogManager 和已存在的内存存储替身。
-SourceSpan 缺失时只替换位置检查；建表测试单独替换 RowCodec 预检；
+源码位置与建表编码预检使用正式接口；
 过滤测试的 Mock 只给出预设判断结果，不实现表达式求值。
 这些测试不代表完整 SQL 执行链或磁盘持久化通过。
 """
@@ -13,7 +13,6 @@ from fakes.in_memory_storage_engine import InMemoryStorageEngine
 from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE
 from minidb.catalog.catalog_manager import CatalogManager
-from minidb.compiler._checks import Check
 from minidb.compiler.bound import BoundBinary, BoundColumn, BoundLiteral
 from minidb.compiler.plan import (
     CreateTablePlan,
@@ -24,33 +23,22 @@ from minidb.compiler.plan import (
     SeqScanPlan,
 )
 from minidb.core.expressions import ExprOp
-from minidb.core.errors import DbError, ErrorStage, INVALID_PLAN
+from minidb.core.errors import DbError, ErrorStage, INVALID_PLAN, TABLE_EXISTS
 from minidb.core.records import RowId
 from minidb.core.result import ResultColumn
 from minidb.core.schema import DataType
+from minidb.core.source import SourcePos, SourceSpan
 from minidb.engine import expression_eval
 from minidb.engine.context import ExecutionContext
 from minidb.engine.executor import Executor
-
-
-try:
-    from minidb.core.source import SourcePos, SourceSpan
-except ModuleNotFoundError as error:
-    if error.name != "minidb.core.source":
-        raise
-    SourceSpan = None
 
 
 class ExecutorIntegrationTests(unittest.TestCase):
     """重点检查字段传递、扫描关闭和 RowId，不模拟未实现的磁盘能力。"""
 
     def setUp(self):
-        """用已有七字段目录行装配正式目录；待 SourceSpan 到位后自动使用它。"""
-        if SourceSpan is None:
-            self.span = None
-            self.enterContext(patch.object(Check, "span"))
-        else:
-            self.span = SourceSpan(SourcePos(1, 1, 0), SourcePos(1, 2, 1), "test.sql")
+        """用已有七字段目录行装配正式目录，位置使用正式 SourceSpan。"""
+        self.span = SourceSpan(SourcePos(1, 1, 0), SourcePos(1, 2, 1), "test.sql")
         self.storage = InMemoryStorageEngine()
         self.addCleanup(self.storage.abort)
         CatalogManager.bootstrap_or_load(self.storage, True)
@@ -100,16 +88,9 @@ class ExecutorIntegrationTests(unittest.TestCase):
         self.assertEqual(self.storage.sync_count, 0)
 
     def test_create_passes_complete_table_to_existing_catalog(self):
-        """建表接通表号、根页和目录行写入；本项不验证尚缺的编码预检。"""
+        """建表接通表号、根页、真实 RowCodec 预检和目录行写入。"""
         plan = CreateTablePlan("course", STUDENT_SCHEMA, self.span)
-        with patch("minidb.catalog.catalog_manager._preflight_rows") as preflight:
-            result = self.executor.execute(plan, self.context)
-        expected_rows = (
-            (2, "course", 3, 3, 0, "id", "INT"),
-            (2, "course", 3, 3, 1, "name", "VARCHAR"),
-            (2, "course", 3, 3, 2, "age", "INT"),
-        )
-        preflight.assert_called_once_with(expected_rows)
+        result = self.executor.execute(plan, self.context)
         table = self.catalog.find_table("course")
         self.assertEqual((table.ref.table_id, table.ref.root_page_id), (2, 3))
         self.assertEqual(table.schema, STUDENT_SCHEMA)
@@ -119,14 +100,25 @@ class ExecutorIntegrationTests(unittest.TestCase):
         self.assertEqual(result.affected_rows, 0)
         self.assertEqual(self.storage.sync_count, 0)
 
-    def test_create_propagates_missing_codec_without_publishing_table(self):
-        """目录依赖失败时不能返回建表成功，也不能跳过预检登记新表。"""
-        failure = ModuleNotFoundError("RowCodec 尚未提供")
-        with patch("minidb.catalog.catalog_manager._preflight_rows", side_effect=failure):
-            with self.assertRaises(ModuleNotFoundError) as raised:
-                self.executor.execute(CreateTablePlan("course", STUDENT_SCHEMA, self.span), self.context)
-        self.assertIs(raised.exception, failure)
-        self.assertIsNone(self.catalog.find_table("course"))
+    def test_repeated_create_is_rejected_before_allocating_or_writing(self):
+        """同一建表计划执行两次，第二次须查当前目录，不能再领表号或分配根页。"""
+        plan = CreateTablePlan("course", STUDENT_SCHEMA, self.span)
+        self.executor.execute(plan, self.context)
+        original_table = self.catalog.find_table("course")
+        with patch.object(self.catalog, "reserve_table_id", wraps=self.catalog.reserve_table_id) as reserve, \
+             patch.object(self.storage, "create_heap", wraps=self.storage.create_heap) as create, \
+             patch.object(self.storage, "insert_row", wraps=self.storage.insert_row) as insert:
+            with self.assertRaises(DbError) as raised:
+                self.executor.execute(plan, self.context)
+            reserve.assert_not_called()
+            create.assert_not_called()
+            insert.assert_not_called()
+        error = raised.exception
+        self.assertEqual(error.code, TABLE_EXISTS)
+        self.assertIs(error.stage, ErrorStage.SEMANTIC)
+        self.assertIs(error.span, self.span)
+        self.assertEqual(error.context, {"operation": "Executor.execute", "table_name": "course"})
+        self.assertEqual(self.catalog.find_table("course"), original_table)
         self.assertEqual(self.storage.sync_count, 0)
 
     def test_delete_closes_scan_before_using_row_ids_and_reclaiming(self):

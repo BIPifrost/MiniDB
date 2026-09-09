@@ -8,7 +8,7 @@
   core.errors.DbError(stage, code, message, span, context)、ErrorStage 和错误码。
 * 周升荣：core.result.ResultColumn(name: str, data_type: DataType)。
 
-这些依赖未提供时，相应入口不能运行；本模块不会生成假 AST 或假结果。
+入口直接使用这些正式类型，统一检查结构、名字和表达式类型。
 """
 
 from __future__ import annotations
@@ -154,6 +154,9 @@ class Semantic:
         completed = {}
         while pending:
             node, leaving = pending.pop()
+            # AST 已通过完整结构检查，共享节点可以直接使用本次绑定的结果。
+            if id(node) in completed:
+                continue
             if isinstance(node, ast.IdentifierExpr):
                 name = _name(node.name, node.span)
                 index, column = _column(table, name, node.span)
@@ -221,8 +224,15 @@ def _operation_type(op: ExprOp, operands: tuple[BoundExpr, ...], span: SourceSpa
         context.update(expected="BOOL", actual=types[0].name)
     else:
         context.update(left_type=types[0].name, right_type=types[1].name)
+        # 这里只描述报错原因；哪些组合合法仍统一由 resolve_result_type 决定。
+        if op in (ExprOp.LT, ExprOp.LE, ExprOp.GT, ExprOp.GE):
+            expected = ["INT", "INT"]
+        elif op in (ExprOp.AND, ExprOp.OR):
+            expected = ["BOOL", "BOOL"]
+        else:
+            expected = "同类型的 INT 或 VARCHAR"
         context.update(
-            expected=["BOOL", "BOOL"] if op in (ExprOp.AND, ExprOp.OR) else "同类型的 INT 或 VARCHAR",
+            expected=expected,
             actual=[data_type.name for data_type in types],
         )
     code = "UNSUPPORTED_COMPARISON" if op in (ExprOp.LT, ExprOp.LE, ExprOp.GT, ExprOp.GE) else "TYPE_MISMATCH"

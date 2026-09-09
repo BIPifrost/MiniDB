@@ -79,7 +79,7 @@ def validate_plan(plan: Plan) -> None:
         check.table(plan.table)
         check.row(plan.row, plan.table.schema)
     else:
-        table = _validate_stream(plan.child, check)
+        table = _validate_stream(plan.child, check, plan.span)
         if isinstance(plan, ProjectPlan):
             check.projection(table, plan.column_indexes, plan.output_columns)
         else:
@@ -87,7 +87,7 @@ def validate_plan(plan: Plan) -> None:
             check.require(plan.table == table, "table", "与删除输入的扫描表一致", repr(plan.table.ref))
 
 
-def _validate_stream(node, check: Check) -> TableDef:
+def _validate_stream(node, check: Check, parent) -> TableDef:
     """沿 Filter 向下找到 SeqScan，拒绝循环和错误节点，然后核对条件引用的原表列。"""
     # 先沿 child 找到最底部的数据源，再用该表的完整 Schema 校验所有 Filter。
     # 如果中途遇到 Project，原行的字段和 RowId 可能已丢失，不能继续当扫描流使用。
@@ -96,13 +96,14 @@ def _validate_stream(node, check: Check) -> TableDef:
     while isinstance(node, FilterPlan):
         check.require(id(node) not in seen, "child", "无环计划", type(node).__name__)
         seen.add(id(node))
-        check.span(node.span)
+        check.span(node.span, parent=parent)
         check.require(node.predicate is not None, "predicate", "Filter 必须带条件", None)
         filters.append(node)
+        parent = node.span
         node = node.child
     check.require(isinstance(node, SeqScanPlan), "child", "SeqScan 或 Filter，不能接收 Project", type(node).__name__)
-    check.span(node.span)
+    check.span(node.span, parent=parent)
     check.table(node.table)
     for filtered in reversed(filters):
-        validate_predicate(filtered.predicate, node.table, check)
+        validate_predicate(filtered.predicate, node.table, check, filtered.span)
     return node.table

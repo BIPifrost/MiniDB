@@ -1,0 +1,1635 @@
+{
+  "cases": {
+    "create": {
+      "ast": {
+        "columns": [
+          {
+            "data_type": "INT",
+            "name": {
+              "node_type": "NameRef",
+              "span": {
+                "end": {
+                  "column": 24,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 23
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 21,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 20
+                }
+              },
+              "text": "cid"
+            },
+            "node_type": "ColumnDecl",
+            "span": {
+              "end": {
+                "column": 28,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 27
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 21,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 20
+              }
+            },
+            "type_span": {
+              "end": {
+                "column": 28,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 27
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 25,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 24
+              }
+            }
+          },
+          {
+            "data_type": "VARCHAR",
+            "name": {
+              "node_type": "NameRef",
+              "span": {
+                "end": {
+                  "column": 35,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 34
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 30,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 29
+                }
+              },
+              "text": "title"
+            },
+            "node_type": "ColumnDecl",
+            "span": {
+              "end": {
+                "column": 43,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 42
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 30,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 29
+              }
+            },
+            "type_span": {
+              "end": {
+                "column": 43,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 42
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 36,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 35
+              }
+            }
+          }
+        ],
+        "node_type": "CreateTableStmt",
+        "span": {
+          "end": {
+            "column": 45,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 44
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": {
+          "node_type": "NameRef",
+          "span": {
+            "end": {
+              "column": 20,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 19
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 14,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 13
+            }
+          },
+          "text": "course"
+        }
+      },
+      "bound": {
+        "node_type": "BoundCreate",
+        "schema": {
+          "columns": [
+            {
+              "data_type": "INT",
+              "name": "cid",
+              "node_type": "ColumnDef"
+            },
+            {
+              "data_type": "VARCHAR",
+              "name": "title",
+              "node_type": "ColumnDef"
+            }
+          ],
+          "node_type": "Schema"
+        },
+        "span": {
+          "end": {
+            "column": 45,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 44
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": "course"
+      },
+      "plan": {
+        "node_type": "CreateTablePlan",
+        "schema": {
+          "columns": [
+            {
+              "data_type": "INT",
+              "name": "cid",
+              "node_type": "ColumnDef"
+            },
+            {
+              "data_type": "VARCHAR",
+              "name": "title",
+              "node_type": "ColumnDef"
+            }
+          ],
+          "node_type": "Schema"
+        },
+        "span": {
+          "end": {
+            "column": 45,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 44
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": "course"
+      },
+      "sql": "CREATE TABLE course(cid INT, title VARCHAR);"
+    },
+    "delete": {
+      "ast": {
+        "node_type": "DeleteStmt",
+        "span": {
+          "end": {
+            "column": 34,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 33
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": {
+          "node_type": "NameRef",
+          "span": {
+            "end": {
+              "column": 20,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 19
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 13,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 12
+            }
+          },
+          "text": "student"
+        },
+        "where": {
+          "left": {
+            "name": "id",
+            "node_type": "IdentifierExpr",
+            "span": {
+              "end": {
+                "column": 29,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 28
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 27,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 26
+              }
+            }
+          },
+          "node_type": "BinaryExpr",
+          "op": "EQ",
+          "op_span": {
+            "end": {
+              "column": 31,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 30
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 30,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 29
+            }
+          },
+          "right": {
+            "data_type": "INT",
+            "node_type": "LiteralExpr",
+            "span": {
+              "end": {
+                "column": 33,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 32
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              }
+            },
+            "value": 1
+          },
+          "span": {
+            "end": {
+              "column": 33,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 32
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 27,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 26
+            }
+          }
+        }
+      },
+      "bound": {
+        "node_type": "BoundDelete",
+        "predicate": {
+          "data_type": "BOOL",
+          "left": {
+            "data_type": "INT",
+            "index": 0,
+            "node_type": "BoundColumn",
+            "span": {
+              "end": {
+                "column": 29,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 28
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 27,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 26
+              }
+            }
+          },
+          "node_type": "BoundBinary",
+          "op": "EQ",
+          "op_span": {
+            "end": {
+              "column": 31,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 30
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 30,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 29
+            }
+          },
+          "right": {
+            "data_type": "INT",
+            "node_type": "BoundLiteral",
+            "span": {
+              "end": {
+                "column": 33,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 32
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              }
+            },
+            "value": 1
+          },
+          "span": {
+            "end": {
+              "column": 33,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 32
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 27,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 26
+            }
+          }
+        },
+        "span": {
+          "end": {
+            "column": 34,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 33
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "plan": {
+        "child": {
+          "child": {
+            "node_type": "SeqScanPlan",
+            "span": {
+              "end": {
+                "column": 34,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 33
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 1,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 0
+              }
+            },
+            "table": {
+              "node_type": "TableDef",
+              "ref": {
+                "name": "student",
+                "node_type": "TableRef",
+                "root_page_id": 2,
+                "table_id": 1
+              },
+              "schema": {
+                "columns": [
+                  {
+                    "data_type": "INT",
+                    "name": "id",
+                    "node_type": "ColumnDef"
+                  },
+                  {
+                    "data_type": "VARCHAR",
+                    "name": "name",
+                    "node_type": "ColumnDef"
+                  },
+                  {
+                    "data_type": "INT",
+                    "name": "age",
+                    "node_type": "ColumnDef"
+                  }
+                ],
+                "node_type": "Schema"
+              }
+            }
+          },
+          "node_type": "FilterPlan",
+          "predicate": {
+            "data_type": "BOOL",
+            "left": {
+              "data_type": "INT",
+              "index": 0,
+              "node_type": "BoundColumn",
+              "span": {
+                "end": {
+                  "column": 29,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 28
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 27,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 26
+                }
+              }
+            },
+            "node_type": "BoundBinary",
+            "op": "EQ",
+            "op_span": {
+              "end": {
+                "column": 31,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 30
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 30,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 29
+              }
+            },
+            "right": {
+              "data_type": "INT",
+              "node_type": "BoundLiteral",
+              "span": {
+                "end": {
+                  "column": 33,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 32
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 32,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 31
+                }
+              },
+              "value": 1
+            },
+            "span": {
+              "end": {
+                "column": 33,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 32
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 27,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 26
+              }
+            }
+          },
+          "span": {
+            "end": {
+              "column": 34,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 33
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 1,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 0
+            }
+          }
+        },
+        "node_type": "DeletePlan",
+        "span": {
+          "end": {
+            "column": 34,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 33
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "sql": "DELETE FROM student WHERE id = 1;"
+    },
+    "insert": {
+      "ast": {
+        "columns": [
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 25,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 24
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 21,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 20
+              }
+            },
+            "text": "name"
+          },
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 29,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 28
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 26,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 25
+              }
+            },
+            "text": "age"
+          },
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 30,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 29
+              }
+            },
+            "text": "id"
+          }
+        ],
+        "node_type": "InsertStmt",
+        "span": {
+          "end": {
+            "column": 56,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 55
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": {
+          "node_type": "NameRef",
+          "span": {
+            "end": {
+              "column": 20,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 19
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 13,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 12
+            }
+          },
+          "text": "student"
+        },
+        "values": [
+          {
+            "data_type": "VARCHAR",
+            "node_type": "LiteralExpr",
+            "span": {
+              "end": {
+                "column": 49,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 48
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 42,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 41
+              }
+            },
+            "value": "Alice"
+          },
+          {
+            "data_type": "INT",
+            "node_type": "LiteralExpr",
+            "span": {
+              "end": {
+                "column": 52,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 51
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 50,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 49
+              }
+            },
+            "value": 20
+          },
+          {
+            "data_type": "INT",
+            "node_type": "LiteralExpr",
+            "span": {
+              "end": {
+                "column": 54,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 53
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 53,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 52
+              }
+            },
+            "value": 1
+          }
+        ]
+      },
+      "bound": {
+        "node_type": "BoundInsert",
+        "row": [
+          1,
+          "Alice",
+          20
+        ],
+        "span": {
+          "end": {
+            "column": 56,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 55
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "plan": {
+        "node_type": "InsertPlan",
+        "row": [
+          1,
+          "Alice",
+          20
+        ],
+        "span": {
+          "end": {
+            "column": 56,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 55
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "sql": "INSERT INTO student(name,age,id) VALUES ('Alice',20,1);"
+    },
+    "select": {
+      "ast": {
+        "columns": [
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 12,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 11
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 8,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 7
+              }
+            },
+            "text": "name"
+          }
+        ],
+        "node_type": "SelectStmt",
+        "select_all": false,
+        "span": {
+          "end": {
+            "column": 42,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 41
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": {
+          "node_type": "NameRef",
+          "span": {
+            "end": {
+              "column": 25,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 24
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 18,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 17
+            }
+          },
+          "text": "student"
+        },
+        "where": {
+          "left": {
+            "name": "age",
+            "node_type": "IdentifierExpr",
+            "span": {
+              "end": {
+                "column": 35,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 34
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              }
+            }
+          },
+          "node_type": "BinaryExpr",
+          "op": "GE",
+          "op_span": {
+            "end": {
+              "column": 38,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 37
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 36,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 35
+            }
+          },
+          "right": {
+            "data_type": "INT",
+            "node_type": "LiteralExpr",
+            "span": {
+              "end": {
+                "column": 41,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 40
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 39,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 38
+              }
+            },
+            "value": 18
+          },
+          "span": {
+            "end": {
+              "column": 41,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 40
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 32,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 31
+            }
+          }
+        }
+      },
+      "bound": {
+        "node_type": "BoundSelect",
+        "output_columns": [
+          {
+            "data_type": "VARCHAR",
+            "name": "name",
+            "node_type": "ResultColumn"
+          }
+        ],
+        "predicate": {
+          "data_type": "BOOL",
+          "left": {
+            "data_type": "INT",
+            "index": 2,
+            "node_type": "BoundColumn",
+            "span": {
+              "end": {
+                "column": 35,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 34
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              }
+            }
+          },
+          "node_type": "BoundBinary",
+          "op": "GE",
+          "op_span": {
+            "end": {
+              "column": 38,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 37
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 36,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 35
+            }
+          },
+          "right": {
+            "data_type": "INT",
+            "node_type": "BoundLiteral",
+            "span": {
+              "end": {
+                "column": 41,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 40
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 39,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 38
+              }
+            },
+            "value": 18
+          },
+          "span": {
+            "end": {
+              "column": 41,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 40
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 32,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 31
+            }
+          }
+        },
+        "projection": [
+          1
+        ],
+        "span": {
+          "end": {
+            "column": 42,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 41
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "plan": {
+        "child": {
+          "child": {
+            "node_type": "SeqScanPlan",
+            "span": {
+              "end": {
+                "column": 42,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 41
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 1,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 0
+              }
+            },
+            "table": {
+              "node_type": "TableDef",
+              "ref": {
+                "name": "student",
+                "node_type": "TableRef",
+                "root_page_id": 2,
+                "table_id": 1
+              },
+              "schema": {
+                "columns": [
+                  {
+                    "data_type": "INT",
+                    "name": "id",
+                    "node_type": "ColumnDef"
+                  },
+                  {
+                    "data_type": "VARCHAR",
+                    "name": "name",
+                    "node_type": "ColumnDef"
+                  },
+                  {
+                    "data_type": "INT",
+                    "name": "age",
+                    "node_type": "ColumnDef"
+                  }
+                ],
+                "node_type": "Schema"
+              }
+            }
+          },
+          "node_type": "FilterPlan",
+          "predicate": {
+            "data_type": "BOOL",
+            "left": {
+              "data_type": "INT",
+              "index": 2,
+              "node_type": "BoundColumn",
+              "span": {
+                "end": {
+                  "column": 35,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 34
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 32,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 31
+                }
+              }
+            },
+            "node_type": "BoundBinary",
+            "op": "GE",
+            "op_span": {
+              "end": {
+                "column": 38,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 37
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 36,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 35
+              }
+            },
+            "right": {
+              "data_type": "INT",
+              "node_type": "BoundLiteral",
+              "span": {
+                "end": {
+                  "column": 41,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 40
+                },
+                "node_type": "SourceSpan",
+                "source_name": "<test>",
+                "start": {
+                  "column": 39,
+                  "line": 1,
+                  "node_type": "SourcePos",
+                  "offset": 38
+                }
+              },
+              "value": 18
+            },
+            "span": {
+              "end": {
+                "column": 41,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 40
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 32,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 31
+              }
+            }
+          },
+          "span": {
+            "end": {
+              "column": 42,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 41
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 1,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 0
+            }
+          }
+        },
+        "column_indexes": [
+          1
+        ],
+        "node_type": "ProjectPlan",
+        "output_columns": [
+          {
+            "data_type": "VARCHAR",
+            "name": "name",
+            "node_type": "ResultColumn"
+          }
+        ],
+        "span": {
+          "end": {
+            "column": 42,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 41
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        }
+      },
+      "sql": "SELECT name FROM student WHERE age >= 18;"
+    },
+    "select_duplicate": {
+      "ast": {
+        "columns": [
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 10,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 9
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 8,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 7
+              }
+            },
+            "text": "id"
+          },
+          {
+            "node_type": "NameRef",
+            "span": {
+              "end": {
+                "column": 13,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 12
+              },
+              "node_type": "SourceSpan",
+              "source_name": "<test>",
+              "start": {
+                "column": 11,
+                "line": 1,
+                "node_type": "SourcePos",
+                "offset": 10
+              }
+            },
+            "text": "id"
+          }
+        ],
+        "node_type": "SelectStmt",
+        "select_all": false,
+        "span": {
+          "end": {
+            "column": 27,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 26
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table_name": {
+          "node_type": "NameRef",
+          "span": {
+            "end": {
+              "column": 26,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 25
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 19,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 18
+            }
+          },
+          "text": "student"
+        },
+        "where": null
+      },
+      "bound": {
+        "node_type": "BoundSelect",
+        "output_columns": [
+          {
+            "data_type": "INT",
+            "name": "id",
+            "node_type": "ResultColumn"
+          },
+          {
+            "data_type": "INT",
+            "name": "id",
+            "node_type": "ResultColumn"
+          }
+        ],
+        "predicate": null,
+        "projection": [
+          0,
+          0
+        ],
+        "span": {
+          "end": {
+            "column": 27,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 26
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        },
+        "table": {
+          "node_type": "TableDef",
+          "ref": {
+            "name": "student",
+            "node_type": "TableRef",
+            "root_page_id": 2,
+            "table_id": 1
+          },
+          "schema": {
+            "columns": [
+              {
+                "data_type": "INT",
+                "name": "id",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "VARCHAR",
+                "name": "name",
+                "node_type": "ColumnDef"
+              },
+              {
+                "data_type": "INT",
+                "name": "age",
+                "node_type": "ColumnDef"
+              }
+            ],
+            "node_type": "Schema"
+          }
+        }
+      },
+      "plan": {
+        "child": {
+          "node_type": "SeqScanPlan",
+          "span": {
+            "end": {
+              "column": 27,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 26
+            },
+            "node_type": "SourceSpan",
+            "source_name": "<test>",
+            "start": {
+              "column": 1,
+              "line": 1,
+              "node_type": "SourcePos",
+              "offset": 0
+            }
+          },
+          "table": {
+            "node_type": "TableDef",
+            "ref": {
+              "name": "student",
+              "node_type": "TableRef",
+              "root_page_id": 2,
+              "table_id": 1
+            },
+            "schema": {
+              "columns": [
+                {
+                  "data_type": "INT",
+                  "name": "id",
+                  "node_type": "ColumnDef"
+                },
+                {
+                  "data_type": "VARCHAR",
+                  "name": "name",
+                  "node_type": "ColumnDef"
+                },
+                {
+                  "data_type": "INT",
+                  "name": "age",
+                  "node_type": "ColumnDef"
+                }
+              ],
+              "node_type": "Schema"
+            }
+          }
+        },
+        "column_indexes": [
+          0,
+          0
+        ],
+        "node_type": "ProjectPlan",
+        "output_columns": [
+          {
+            "data_type": "INT",
+            "name": "id",
+            "node_type": "ResultColumn"
+          },
+          {
+            "data_type": "INT",
+            "name": "id",
+            "node_type": "ResultColumn"
+          }
+        ],
+        "span": {
+          "end": {
+            "column": 27,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 26
+          },
+          "node_type": "SourceSpan",
+          "source_name": "<test>",
+          "start": {
+            "column": 1,
+            "line": 1,
+            "node_type": "SourcePos",
+            "offset": 0
+          }
+        }
+      },
+      "sql": "SELECT id,id FROM student;"
+    }
+  },
+  "format_version": 1,
+  "source_name": "<test>"
+}
