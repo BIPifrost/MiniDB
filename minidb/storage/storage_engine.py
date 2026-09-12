@@ -16,6 +16,7 @@ from typing import Protocol
 from minidb.core import errors
 from minidb.core.disk_types import (
     CATALOG_ROOT_PAGE_ID,
+    FORMAT_VERSION,
     INVALID_PAGE_ID,
     MAX_PAGE_ID,
     PAGE_SIZE,
@@ -107,11 +108,14 @@ class _PageRowScan:
                 while self._slot_id < self._page.header.slot_count:
                     slot_id = self._slot_id
                     self._slot_id += 1
+                    slot = self._page.slots[slot_id]
                     record = self._page.record(slot_id)
                     if record is None:
                         continue
                     row = self._engine._codec.decode(record, self._table.schema)
-                    return StoredRow(RowId(self._page.page_id, slot_id), row)
+                    return StoredRow(
+                        RowId(self._page.page_id, slot_id, slot.generation), row
+                    )
 
                 # 当前页已经读完。清掉页面对象后，下一轮才加载后继页，
                 # 因而不会把多张页面副本长期留在扫描器里。
@@ -272,18 +276,18 @@ class StorageEngine:
         tail_id = formal.ref.root_page_id
         for page_id, page in self._walk_pages(formal):
             tail_id = page_id
-            slot_id = page.insert(encoded)
-            if slot_id is not None:
+            row_slot = page.insert(encoded)
+            if row_slot is not None:
                 self._buffer.write_page(page_id, page.to_bytes())
-                return RowId(page_id, slot_id)
+                return RowId(page_id, row_slot.slot_id, row_slot.generation)
 
         # 所有旧页都放不下时才扩页。先写好新页，再把旧尾页连向它；
         # 这样不会让表链暂时指向一张全零、尚无合法页头的页面。
         new_page_id = self._buffer.new_page()
         _validate_allocated_page_id(new_page_id, "insert_row")
         new_page = DataPage.empty(formal.ref.table_id, page_id=new_page_id)
-        slot_id = new_page.insert(encoded)
-        if slot_id is None:  # 前面的 MAX_RECORD_SIZE 校验保证理论上不会发生。
+        row_slot = new_page.insert(encoded)
+        if row_slot is None:  # 前面的 MAX_RECORD_SIZE 校验保证理论上不会发生。
             _error(
                 errors.ROW_ENCODING_ERROR,
                 "通过大小校验的记录仍无法写入空页",
@@ -304,7 +308,7 @@ class StorageEngine:
             )
         tail.set_next_page_id(new_page_id)
         self._buffer.write_page(tail_id, tail.to_bytes())
-        return RowId(new_page_id, slot_id)
+        return RowId(new_page_id, row_slot.slot_id, row_slot.generation)
 
     def scan_rows(self, table: TableDef) -> RowScan:
         """创建逐页流式扫描；调用方必须读完或显式 close。"""
@@ -333,7 +337,7 @@ class StorageEngine:
         for page_id, page in self._walk_pages(formal):
             if page_id != row_id.page_id:
                 continue
-            changed = page.delete(row_id.slot_id)
+            changed = page.delete(row_id.slot_id, row_id.generation)
             if changed:
                 self._buffer.write_page(page_id, page.to_bytes())
             return changed
@@ -441,11 +445,21 @@ class StorageEngine:
                 page_id=page_id,
             )
         data = self._buffer.get_page(page_id)
-        return DataPage(
+        page = DataPage(
             data,
             page_id=page_id,
             expected_table_id=table.ref.table_id,
         )
+        if page.header.version != FORMAT_VERSION:
+            _error(
+                errors.PAGE_CORRUPTED,
+                "数据页版本与数据库文件格式不一致",
+                "read_table_page",
+                page_id=page_id,
+                expected_version=FORMAT_VERSION,
+                actual_version=page.header.version,
+            )
+        return page
 
     def _scan_closed(self, scan: _PageRowScan) -> None:
         self._active_scans.discard(scan)

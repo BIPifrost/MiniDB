@@ -1,6 +1,6 @@
 import unittest
 
-from minidb.core.records import RowId, RowScan, StoredRow
+from minidb.core.records import RowId, RowScan, RowSlot, StoredRow
 from minidb.core.result import ExecRecord, QueryResult, ResultColumn
 from minidb.engine.context import ExecutionContext
 from minidb.storage.storage_engine import StorageEngine
@@ -26,7 +26,7 @@ class ListRowScan:
 
 class ExecutionTypeTests(unittest.TestCase):
     def test_record_types_are_immutable_and_scan_is_structural(self):
-        row_id = RowId(page_id=2, slot_id=0)
+        row_id = RowId(page_id=2, slot_id=0, generation=7)
         stored = StoredRow(row_id=row_id, values=(1, "Alice", 20))
         scan = ListRowScan([stored])
 
@@ -37,10 +37,14 @@ class ExecutionTypeTests(unittest.TestCase):
             next(scan)
         with self.assertRaises(AttributeError):
             row_id.slot_id = 1
+        self.assertEqual(row_id.generation, 7)
 
     def test_exec_record_may_drop_row_id_after_projection(self):
         record = ExecRecord(values=(1, "Alice"), row_id=None)
         self.assertIsNone(record.row_id)
+
+    def test_row_slot_captures_slot_and_generation(self):
+        self.assertEqual(RowSlot(4, 9), RowSlot(slot_id=4, generation=9))
 
     def test_query_result_copies_lists_and_allows_duplicate_column_names(self):
         columns = [ResultColumn("id", "INT"), ResultColumn("id", "INT")]
@@ -78,10 +82,11 @@ class ExecutionTypeTests(unittest.TestCase):
             free_end=4088,
             live_count=1,
         )
-        slot = RecordSlot(offset=32, length=15, state=SlotState.LIVE)
+        slot = RecordSlot(offset=32, length=15, state=SlotState.LIVE, generation=1)
 
         self.assertEqual(header.live_count, 1)
         self.assertEqual(slot.state, SlotState.LIVE)
+        self.assertEqual(slot.generation, 1)
 
     def test_data_page_value_types_reject_inconsistent_counts(self):
         with self.assertRaises(ValueError):

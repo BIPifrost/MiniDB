@@ -25,11 +25,30 @@ def _validate_row(values: object, *, field_name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class RowSlot:
+    """Slot identity returned by a data-page insertion."""
+
+    slot_id: int
+    generation: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.slot_id, bool) or not isinstance(self.slot_id, int):
+            raise TypeError("slot_id must be an int")
+        if self.slot_id < 0:
+            raise ValueError("slot_id must be non-negative")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise TypeError("generation must be an int")
+        if not 0 <= self.generation <= 0xFFFFFF:
+            raise ValueError("generation must be between 0 and 0xFFFFFF")
+
+
+@dataclass(frozen=True, slots=True)
 class RowId:
     """Location of a row for the duration of the current storage operation."""
 
     page_id: int
     slot_id: int
+    generation: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.page_id, bool) or not isinstance(self.page_id, int):
@@ -40,6 +59,10 @@ class RowId:
             raise TypeError("slot_id must be an int")
         if self.slot_id < 0:
             raise ValueError("slot_id must be non-negative")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise TypeError("generation must be an int")
+        if not 0 <= self.generation <= 0xFFFFFF:
+            raise ValueError("generation must be between 0 and 0xFFFFFF")
 
 
 @dataclass(frozen=True, slots=True)

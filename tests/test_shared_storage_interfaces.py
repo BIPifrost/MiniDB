@@ -57,3 +57,4 @@ class SharedStorageInterfaceTests(unittest.TestCase):
         header = DataPageHeader(fields[3], fields[4], fields[5], fields[6], fields[7], fields[9])
         self.assertEqual(header.live_count, 1)
         self.assertEqual(RowId(2, 0).page_id, 2)
+        self.assertEqual(RowId(2, 0).generation, 0)

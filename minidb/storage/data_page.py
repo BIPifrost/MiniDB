@@ -28,18 +28,22 @@ from minidb.core.disk_types import (
     MAX_PAGE_ID,
     PAGE_SIZE,
 )
+from minidb.core.records import RowSlot
 
 
 DATA_PAGE_MAGIC = b"MDPG"
+LEGACY_DATA_PAGE_VERSION = 1
 DATA_PAGE_VERSION = FORMAT_VERSION
+DATA_PAGE_VERSION_V2 = 2
 DATA_PAGE_TYPE = 1
 DATA_PAGE_HEADER_SIZE = 32
 RECORD_SLOT_SIZE = 8
 MAX_RECORD_SIZE = PAGE_SIZE - DATA_PAGE_HEADER_SIZE - RECORD_SLOT_SIZE
+MAX_SLOT_GENERATION = 0xFFFFFF
 
 # 显式使用小端序和标准大小，避免不同平台的本机对齐规则改变磁盘格式。
 _HEADER_STRUCT = Struct("<4sHHIIHHHHII")
-_SLOT_STRUCT = Struct("<HHB3x")
+_SLOT_PREFIX_STRUCT = Struct("<HHB")
 
 
 class SlotState(IntEnum):
@@ -63,6 +67,7 @@ class DataPageHeader:
     free_start: int
     free_end: int
     live_count: int
+    version: int = DATA_PAGE_VERSION
 
     def __post_init__(self) -> None:
         _require_int_range("table_id", self.table_id, 0, 0xFFFFFFFE)
@@ -76,6 +81,8 @@ class DataPageHeader:
         _require_int_range("free_start", self.free_start, DATA_PAGE_HEADER_SIZE, PAGE_SIZE)
         _require_int_range("free_end", self.free_end, DATA_PAGE_HEADER_SIZE, PAGE_SIZE)
         _require_int_range("live_count", self.live_count, 0, 0xFFFFFFFF)
+        if self.version not in (LEGACY_DATA_PAGE_VERSION, DATA_PAGE_VERSION_V2):
+            raise ValueError("version must identify a supported data-page format")
         if self.free_end != PAGE_SIZE - self.slot_count * RECORD_SLOT_SIZE:
             raise ValueError("free_end must match the slot directory boundary")
         if self.free_start > self.free_end:
@@ -91,12 +98,16 @@ class RecordSlot:
     offset: int
     length: int
     state: SlotState
+    generation: int = 0
 
     def __post_init__(self) -> None:
-        _require_int_range("offset", self.offset, DATA_PAGE_HEADER_SIZE, 0xFFFF)
-        _require_int_range("length", self.length, 1, 0xFFFF)
         if not isinstance(self.state, SlotState):
             raise TypeError("state must be a SlotState")
+        _require_int_range("generation", self.generation, 0, MAX_SLOT_GENERATION)
+        if self.state is SlotState.DELETED and self.offset == self.length == 0:
+            return
+        _require_int_range("offset", self.offset, DATA_PAGE_HEADER_SIZE, 0xFFFF)
+        _require_int_range("length", self.length, 1, 0xFFFF)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,12 +145,14 @@ class DataPage:
         next_page_id: int = INVALID_PAGE_ID,
         *,
         page_id: int | None = None,
+        version: int = DATA_PAGE_VERSION,
     ) -> "DataPage":
         """创建一张没有记录的合法数据页。"""
         _validate_identity(table_id, "table_id", allow_catalog=True)
         _validate_next_page(next_page_id, page_id=page_id)
+        _validate_data_page_version(version)
         header = DataPageHeader(
-            table_id, next_page_id, 0, DATA_PAGE_HEADER_SIZE, PAGE_SIZE, 0
+            table_id, next_page_id, 0, DATA_PAGE_HEADER_SIZE, PAGE_SIZE, 0, version
         )
         return cls(_encode_header(header), page_id=page_id)
 
@@ -180,45 +193,42 @@ class DataPage:
         return self.header.free_end - self.header.free_start
 
     def can_insert(self, record: bytes) -> bool:
-        """判断一条记录连同新槽能否放入本页，不修改页面。"""
+        """判断记录能否在必要的压缩后放入本页，不修改页面。"""
         _validate_record(record)
-        return len(record) + RECORD_SLOT_SIZE <= self.available_space()
+        reusable = self._reusable_slot_id()
+        slot_bytes = 0 if reusable is not None else RECORD_SLOT_SIZE
+        if len(record) + slot_bytes <= self.available_space():
+            return True
+        if self.header.version != DATA_PAGE_VERSION_V2:
+            return False
+        live_bytes = sum(
+            slot.length for slot in self.slots if slot.state is SlotState.LIVE
+        )
+        compact_space = self.header.free_end - DATA_PAGE_HEADER_SIZE - live_bytes
+        return len(record) + slot_bytes <= compact_space
 
-    def insert(self, record: bytes) -> int | None:
-        """追加一条记录并返回新 slot_id；放不下时返回 None。"""
+    def insert(self, record: bytes) -> RowSlot | None:
+        """插入记录并返回slot_id；v2优先复用删除槽并在需要时压缩。"""
         _validate_record(record)
-        header = self.header
-        required = len(record) + RECORD_SLOT_SIZE
-        if required > self.available_space():
+        if not self.can_insert(record):
             return None
+        candidate = DataPage(self.to_bytes(), page_id=self._page_id)
+        reusable = candidate._reusable_slot_id()
+        required = len(record) + (0 if reusable is not None else RECORD_SLOT_SIZE)
+        if required > candidate.available_space():
+            candidate.compact()
+        row_slot = candidate._insert_contiguous(record, reusable)
+        self._data = candidate._data
+        self._parsed = candidate._parsed
+        return row_slot
 
-        slot_id = header.slot_count
-        record_offset = header.free_start
-        slot_offset = header.free_end - RECORD_SLOT_SIZE
-        self._data[record_offset:record_offset + len(record)] = record
-        _SLOT_STRUCT.pack_into(
-            self._data,
-            slot_offset,
-            record_offset,
-            len(record),
-            int(SlotState.LIVE),
-        )
-        updated = DataPageHeader(
-            header.table_id,
-            header.next_page_id,
-            header.slot_count + 1,
-            header.free_start + len(record),
-            slot_offset,
-            header.live_count + 1,
-        )
-        _write_header(self._data, updated)
-        self._refresh()
-        return slot_id
-
-    def record(self, slot_id: int) -> bytes | None:
-        """读取一个槽；删除槽返回 None，越界统一报 SLOT_ID_INVALID。"""
+    def record(self, slot_id: int, generation: int | None = None) -> bytes | None:
+        """读取一个槽；generation用于拒绝已经失效的物理定位。"""
         slot = self._slot(slot_id)
+        self._check_generation(slot_id, slot, generation)
         if slot.state is SlotState.DELETED:
+            if generation is not None and self.header.version == DATA_PAGE_VERSION_V2:
+                self._stale_row(slot_id, generation, slot.generation, "record")
             return None
         return bytes(self._data[slot.offset:slot.offset + slot.length])
 
@@ -235,13 +245,25 @@ class DataPage:
                 slot.state,
             )
 
-    def delete(self, slot_id: int) -> bool:
-        """把 LIVE 槽标为 DELETED；重复删除返回 False，不移动其他记录。"""
+    def delete(self, slot_id: int, generation: int | None = None) -> bool:
+        """标记删除；携带generation的重复或过期删除统一报STALE_ROW。"""
+        if self.header.version == DATA_PAGE_VERSION_V2 and generation is None:
+            _raise(
+                errors.INVALID_ARGUMENT,
+                "v2数据页删除必须提供generation",
+                "DataPage.delete",
+                field="generation",
+                expected="1..0xFFFFFF",
+                actual="None",
+            )
         slot = self._slot(slot_id)
+        self._check_generation(slot_id, slot, generation)
         if slot.state is SlotState.DELETED:
+            if generation is not None and self.header.version == DATA_PAGE_VERSION_V2:
+                self._stale_row(slot_id, generation, slot.generation, "delete")
             return False
         slot_offset = _slot_offset(slot_id)
-        # 状态在槽的第 5 个字节；保留的后三字节保持原样。
+        # 状态在槽的第5个字节，generation保持不变供后续安全复用。
         self._data[slot_offset + 4] = int(SlotState.DELETED)
         header = self.header
         _write_header(
@@ -253,10 +275,59 @@ class DataPage:
                 header.free_start,
                 header.free_end,
                 header.live_count - 1,
+                header.version,
             ),
         )
         self._refresh()
         return True
+
+    def replace_record(self, slot_id: int, generation: int, record: bytes) -> bool:
+        """替换活动记录；空间不足时返回False且原页面不变。"""
+        _validate_record(record)
+        if self.header.version != DATA_PAGE_VERSION_V2:
+            _raise(
+                errors.INVALID_ARGUMENT,
+                "v1数据页不支持原槽替换",
+                "DataPage.replace_record",
+                version=self.header.version,
+            )
+        slot = self._slot(slot_id)
+        self._check_generation(slot_id, slot, generation)
+        if slot.state is SlotState.DELETED:
+            self._stale_row(slot_id, generation, slot.generation, "replace_record")
+        live_bytes = sum(
+            len(record)
+            if index == slot_id
+            else candidate.length
+            for index, candidate in enumerate(self.slots)
+            if candidate.state is SlotState.LIVE
+        )
+        if DATA_PAGE_HEADER_SIZE + live_bytes > self.header.free_end:
+            return False
+
+        records = {
+            index: (record if index == slot_id else self.record(index))
+            for index, candidate in enumerate(self.slots)
+            if candidate.state is SlotState.LIVE
+        }
+        self._rebuild_compacted(records)
+        return True
+
+    def compact(self) -> None:
+        """压紧活动记录并清除删除负载，不改变slot_id和generation。"""
+        if self.header.version != DATA_PAGE_VERSION_V2:
+            _raise(
+                errors.INVALID_ARGUMENT,
+                "v1数据页不支持页内压缩",
+                "DataPage.compact",
+                version=self.header.version,
+            )
+        records = {
+            index: self.record(index)
+            for index, slot in enumerate(self.slots)
+            if slot.state is SlotState.LIVE
+        }
+        self._rebuild_compacted(records)
 
     def set_next_page_id(self, next_page_id: int) -> None:
         """修改页链后继；禁止指向自己、保留页或超出页号范围。"""
@@ -271,6 +342,7 @@ class DataPage:
                 header.free_start,
                 header.free_end,
                 header.live_count,
+                header.version,
             ),
         )
         self._refresh()
@@ -288,9 +360,128 @@ class DataPage:
                 DATA_PAGE_HEADER_SIZE,
                 PAGE_SIZE,
                 0,
+                header.version,
             ),
         )
         self._refresh()
+
+    def _reusable_slot_id(self) -> int | None:
+        if self.header.version != DATA_PAGE_VERSION_V2:
+            return None
+        return next(
+            (
+                slot_id
+                for slot_id, slot in enumerate(self.slots)
+                if slot.state is SlotState.DELETED
+                and slot.generation < MAX_SLOT_GENERATION
+            ),
+            None,
+        )
+
+    def _insert_contiguous(self, record: bytes, reusable: int | None) -> RowSlot:
+        header = self.header
+        slot_id = header.slot_count if reusable is None else reusable
+        generation = 0
+        if header.version == DATA_PAGE_VERSION_V2:
+            generation = 1 if reusable is None else self.slots[reusable].generation + 1
+        record_offset = header.free_start
+        if reusable is None:
+            slot_offset = header.free_end - RECORD_SLOT_SIZE
+            slot_count = header.slot_count + 1
+            free_end = slot_offset
+        else:
+            slot_offset = _slot_offset(reusable)
+            slot_count = header.slot_count
+            free_end = header.free_end
+        self._data[record_offset:record_offset + len(record)] = record
+        _pack_slot(
+            self._data,
+            slot_offset,
+            record_offset,
+            len(record),
+            SlotState.LIVE,
+            generation,
+            header.version,
+        )
+        _write_header(
+            self._data,
+            DataPageHeader(
+                header.table_id,
+                header.next_page_id,
+                slot_count,
+                header.free_start + len(record),
+                free_end,
+                header.live_count + 1,
+                header.version,
+            ),
+        )
+        self._refresh()
+        return RowSlot(slot_id, generation)
+
+    def _rebuild_compacted(self, records: dict[int, bytes | None]) -> None:
+        header = self.header
+        rebuilt = bytearray(PAGE_SIZE)
+        cursor = DATA_PAGE_HEADER_SIZE
+        for slot_id, slot in enumerate(self.slots):
+            value = records.get(slot_id)
+            if slot.state is SlotState.LIVE:
+                if value is None:
+                    raise AssertionError("live slot record is missing during compaction")
+                rebuilt[cursor:cursor + len(value)] = value
+                offset, length = cursor, len(value)
+                cursor += len(value)
+            else:
+                offset, length = 0, 0
+            _pack_slot(
+                rebuilt,
+                _slot_offset(slot_id),
+                offset,
+                length,
+                slot.state,
+                slot.generation,
+                header.version,
+            )
+        _write_header(
+            rebuilt,
+            DataPageHeader(
+                header.table_id,
+                header.next_page_id,
+                header.slot_count,
+                cursor,
+                header.free_end,
+                header.live_count,
+                header.version,
+            ),
+        )
+        _validate_page(bytes(rebuilt), page_id=self._page_id)
+        self._data = rebuilt
+        self._refresh()
+
+    def _check_generation(
+        self, slot_id: int, slot: RecordSlot, generation: int | None
+    ) -> None:
+        if generation is None:
+            return
+        _require_generation_argument(generation)
+        if generation != slot.generation:
+            self._stale_row(slot_id, generation, slot.generation, "generation_check")
+
+    def _stale_row(
+        self,
+        slot_id: int,
+        generation: int,
+        actual_generation: int,
+        operation: str,
+    ) -> None:
+        _raise(
+            errors.STALE_ROW,
+            "记录位置已经失效",
+            f"DataPage.{operation}",
+            page_id=self._page_id,
+            slot_id=slot_id,
+            expected_generation=generation,
+            actual_generation=actual_generation,
+        )
 
     def _slot(self, slot_id: int) -> RecordSlot:
         if type(slot_id) is not int or not 0 <= slot_id < len(self.slots):
@@ -309,9 +500,14 @@ class DataPage:
         self._parsed = _parse_validated(self._data)
 
 
-def new_page(table_id: int, next_page_id: int = INVALID_PAGE_ID) -> bytes:
+def new_page(
+    table_id: int,
+    next_page_id: int = INVALID_PAGE_ID,
+    *,
+    version: int = DATA_PAGE_VERSION,
+) -> bytes:
     """模块级创建入口，方便不需要长期持有 DataPage 对象的调用方使用。"""
-    return DataPage.empty(table_id, next_page_id).to_bytes()
+    return DataPage.empty(table_id, next_page_id, version=version).to_bytes()
 
 
 def parse_page(
@@ -328,20 +524,45 @@ def parse_page(
 
 def insert_record(
     data: bytes, record: bytes, *, page_id: int | None = None
-) -> tuple[bytes, int | None]:
+) -> tuple[bytes, RowSlot | None]:
     """在页面副本中追加记录，返回新页面和槽号。"""
     page = DataPage(data, page_id=page_id)
-    slot_id = page.insert(record)
-    return page.to_bytes(), slot_id
+    row_slot = page.insert(record)
+    return page.to_bytes(), row_slot
 
 
 def delete_record(
-    data: bytes, slot_id: int, *, page_id: int | None = None
+    data: bytes,
+    slot_id: int,
+    *,
+    generation: int | None = None,
+    page_id: int | None = None,
 ) -> tuple[bytes, bool]:
     """在页面副本中标记槽删除，返回新页面和是否首次删除。"""
     page = DataPage(data, page_id=page_id)
-    deleted = page.delete(slot_id)
+    deleted = page.delete(slot_id, generation)
     return page.to_bytes(), deleted
+
+
+def replace_record(
+    data: bytes,
+    slot_id: int,
+    generation: int,
+    record: bytes,
+    *,
+    page_id: int | None = None,
+) -> tuple[bytes, bool]:
+    """在页面副本中替换记录，空间不足时原样返回。"""
+    page = DataPage(data, page_id=page_id)
+    replaced = page.replace_record(slot_id, generation, record)
+    return page.to_bytes(), replaced
+
+
+def compact_page(data: bytes, *, page_id: int | None = None) -> bytes:
+    """在页面副本中压紧活动记录并清除删除负载。"""
+    page = DataPage(data, page_id=page_id)
+    page.compact()
+    return page.to_bytes()
 
 
 def set_next_page_id(
@@ -402,15 +623,26 @@ def _validate_page(
 
     if magic != DATA_PAGE_MAGIC:
         _corrupt(page_id, "magic", DATA_PAGE_MAGIC.hex(), magic.hex())
-    if version != DATA_PAGE_VERSION:
-        _corrupt(page_id, "version", DATA_PAGE_VERSION, version)
+    if version not in (LEGACY_DATA_PAGE_VERSION, DATA_PAGE_VERSION_V2):
+        _corrupt(
+            page_id,
+            "version",
+            [LEGACY_DATA_PAGE_VERSION, DATA_PAGE_VERSION_V2],
+            version,
+        )
     if page_type != DATA_PAGE_TYPE:
         _corrupt(page_id, "page_type", DATA_PAGE_TYPE, page_type)
     if reserved_short != 0 or reserved_int != 0:
         _corrupt(page_id, "reserved", "all zero", "nonzero")
     try:
         DataPageHeader(
-            table_id, next_page_id, slot_count, free_start, free_end, live_count
+            table_id,
+            next_page_id,
+            slot_count,
+            free_start,
+            free_end,
+            live_count,
+            version,
         )
     except (TypeError, ValueError) as error:
         _corrupt(page_id, "header", "valid data-page bounds", str(error))
@@ -433,11 +665,11 @@ def _validate_page(
     ranges: list[tuple[int, int, int]] = []
     slots: list[RecordSlot] = []
     for slot_id in range(slot_count):
-        record_offset, length, raw_state = _SLOT_STRUCT.unpack_from(
-            data, _slot_offset(slot_id)
+        record_offset, length, raw_state, generation = _unpack_slot_fields(
+            data, slot_id, version
         )
         slot_offset = _slot_offset(slot_id)
-        if any(data[slot_offset + 5:slot_offset + RECORD_SLOT_SIZE]):
+        if version == LEGACY_DATA_PAGE_VERSION and generation != 0:
             _corrupt(
                 page_id,
                 f"slot[{slot_id}].reserved",
@@ -452,9 +684,47 @@ def _validate_page(
                 raw_state,
             )
         try:
-            slot = RecordSlot(record_offset, length, SlotState(raw_state))
+            slot = RecordSlot(
+                record_offset,
+                length,
+                SlotState(raw_state),
+                generation,
+            )
         except (TypeError, ValueError) as error:
             _corrupt(page_id, f"slot[{slot_id}]", "合法记录槽", str(error))
+        if version == DATA_PAGE_VERSION_V2 and generation == 0:
+            _corrupt(
+                page_id,
+                f"slot[{slot_id}].generation",
+                "1..0xFFFFFF",
+                generation,
+            )
+        has_offset = record_offset != 0
+        has_length = length != 0
+        if has_offset != has_length:
+            _corrupt(
+                page_id,
+                f"slot[{slot_id}]",
+                "offset和length同时为零或同时非零",
+                [record_offset, length],
+            )
+        if not has_offset:
+            if version == LEGACY_DATA_PAGE_VERSION:
+                _corrupt(
+                    page_id,
+                    f"slot[{slot_id}]",
+                    "v1槽必须保留原记录位置",
+                    [record_offset, length],
+                )
+            if slot.state is not SlotState.DELETED:
+                _corrupt(
+                    page_id,
+                    f"slot[{slot_id}]",
+                    "只有DELETED槽可以清除负载位置",
+                    raw_state,
+                )
+            slots.append(slot)
+            continue
         if record_offset + length > free_start:
             _corrupt(
                 page_id,
@@ -486,18 +756,43 @@ def _parse_validated(data: bytes | bytearray) -> ParsedDataPage:
     raw = bytes(data)
     fields = _HEADER_STRUCT.unpack_from(raw)
     header = DataPageHeader(
-        fields[3], fields[4], fields[5], fields[6], fields[7], fields[9]
+        fields[3], fields[4], fields[5], fields[6], fields[7], fields[9], fields[1]
     )
     slots = tuple(
-        RecordSlot(*_unpack_slot(raw, slot_id))
+        RecordSlot(*_unpack_slot(raw, slot_id, header.version))
         for slot_id in range(header.slot_count)
     )
     return ParsedDataPage(header, slots)
 
 
-def _unpack_slot(data: bytes, slot_id: int) -> tuple[int, int, SlotState]:
-    offset, length, state = _SLOT_STRUCT.unpack_from(data, _slot_offset(slot_id))
-    return offset, length, SlotState(state)
+def _unpack_slot(
+    data: bytes, slot_id: int, version: int
+) -> tuple[int, int, SlotState, int]:
+    offset, length, state, generation = _unpack_slot_fields(data, slot_id, version)
+    return offset, length, SlotState(state), generation
+
+
+def _unpack_slot_fields(
+    data: bytes, slot_id: int, version: int
+) -> tuple[int, int, int, int]:
+    slot_offset = _slot_offset(slot_id)
+    offset, length, state = _SLOT_PREFIX_STRUCT.unpack_from(data, slot_offset)
+    generation = int.from_bytes(data[slot_offset + 5:slot_offset + 8], "little")
+    return offset, length, state, generation
+
+
+def _pack_slot(
+    data: bytearray,
+    slot_offset: int,
+    offset: int,
+    length: int,
+    state: SlotState,
+    generation: int,
+    version: int,
+) -> None:
+    _SLOT_PREFIX_STRUCT.pack_into(data, slot_offset, offset, length, int(state))
+    stored_generation = generation if version == DATA_PAGE_VERSION_V2 else 0
+    data[slot_offset + 5:slot_offset + 8] = stored_generation.to_bytes(3, "little")
 
 
 def _encode_header(header: DataPageHeader) -> bytes:
@@ -511,7 +806,7 @@ def _write_header(data: bytearray, header: DataPageHeader) -> None:
         data,
         0,
         DATA_PAGE_MAGIC,
-        DATA_PAGE_VERSION,
+        header.version,
         DATA_PAGE_TYPE,
         header.table_id,
         header.next_page_id,
@@ -554,6 +849,33 @@ def _validate_record(record: bytes) -> None:
             "DataPage.record",
             encoded_size=len(record),
             max_size=MAX_RECORD_SIZE,
+        )
+
+
+def _validate_data_page_version(version: object) -> None:
+    if type(version) is not int or version not in (
+        LEGACY_DATA_PAGE_VERSION,
+        DATA_PAGE_VERSION_V2,
+    ):
+        _raise(
+            errors.INVALID_ARGUMENT,
+            "数据页版本不受支持",
+            "DataPage.empty",
+            field="version",
+            expected=[LEGACY_DATA_PAGE_VERSION, DATA_PAGE_VERSION_V2],
+            actual=repr(version),
+        )
+
+
+def _require_generation_argument(generation: object) -> None:
+    if type(generation) is not int or not 0 <= generation <= MAX_SLOT_GENERATION:
+        _raise(
+            errors.INVALID_ARGUMENT,
+            "generation不合法",
+            "DataPage.generation",
+            field="generation",
+            expected="0..0xFFFFFF",
+            actual=repr(generation),
         )
 
 
@@ -643,11 +965,14 @@ def _require_int_range(name: str, value: object, minimum: int, maximum: int) -> 
 
 __all__ = [
     "DATA_PAGE_MAGIC",
+    "LEGACY_DATA_PAGE_VERSION",
     "DATA_PAGE_VERSION",
+    "DATA_PAGE_VERSION_V2",
     "DATA_PAGE_TYPE",
     "DATA_PAGE_HEADER_SIZE",
     "RECORD_SLOT_SIZE",
     "MAX_RECORD_SIZE",
+    "MAX_SLOT_GENERATION",
     "SlotState",
     "DataPageHeader",
     "RecordSlot",
@@ -657,6 +982,8 @@ __all__ = [
     "parse_page",
     "insert_record",
     "delete_record",
+    "replace_record",
+    "compact_page",
     "set_next_page_id",
     "reset_records",
 ]
