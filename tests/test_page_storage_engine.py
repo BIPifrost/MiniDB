@@ -32,7 +32,7 @@ from minidb.core.errors import (
 from minidb.core.expressions import ExprOp
 from minidb.core.records import RowId, RowScan, StoredRow
 from minidb.core.result import ResultColumn
-from minidb.core.schema import DataType
+from minidb.core.schema import ColumnDef, DataType, Schema
 from minidb.engine.context import ExecutionContext
 from minidb.engine.executor import Executor
 from minidb.storage.data_page import DataPage
@@ -379,6 +379,143 @@ class PageStorageEngineTests(unittest.TestCase):
 
 class RealPageStoragePersistenceTests(unittest.TestCase):
     """StorageEngine 与正式 BufferPool/FileManager 的关闭重开验证。"""
+
+    def test_reclaimed_pages_are_reused_without_stale_rows_after_reopen(self):
+        cases = (("lru", 1), ("fifo", 2))
+        for policy, capacity in cases:
+            with self.subTest(policy=policy, capacity=capacity), \
+                 tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "reclaim-reuse.db"
+                rows = tuple(
+                    (index, chr(64 + index) * 3000, 20 + index)
+                    for index in range(1, 4)
+                )
+
+                file_manager = FileManager.open(str(path))
+                buffer = BufferPool(
+                    file_manager,
+                    capacity=capacity,
+                    policy=policy,
+                )
+                storage = StorageEngine(buffer, RowCodec(), file_manager)
+                catalog = CatalogManager.bootstrap_or_load(storage, True)
+                context = ExecutionContext(catalog, storage)
+                executor = Executor()
+                location = span("CREATE TABLE student(id INT, name VARCHAR, age INT);")
+                executor.execute(
+                    CreateTablePlan("student", STUDENT_SCHEMA, location),
+                    context,
+                )
+                student = catalog.find_table("student")
+                row_ids = tuple(storage.insert_row(student, row) for row in rows)
+                self.assertEqual([row_id.page_id for row_id in row_ids], [2, 3, 4])
+
+                # 两张非根页变空后会依次进入空闲链；最后释放的 page 4
+                # 应成为下一张表的根页，而不是继续增长数据库文件。
+                self.assertTrue(storage.delete_row(student, row_ids[1]))
+                self.assertTrue(storage.delete_row(student, row_ids[2]))
+                self.assertEqual(storage.reclaim_empty_pages(student), 2)
+                executor.execute(
+                    CreateTablePlan("replacement", STUDENT_SCHEMA, location),
+                    context,
+                )
+                replacement = catalog.find_table("replacement")
+                self.assertEqual(replacement.ref.root_page_id, row_ids[2].page_id)
+                fresh_row = (99, "fresh", 30)
+                storage.insert_row(replacement, fresh_row)
+                storage.close()
+
+                reopened_file = FileManager.open(str(path))
+                reopened_buffer = BufferPool(
+                    reopened_file,
+                    capacity=capacity,
+                    policy=policy,
+                )
+                reopened_storage = StorageEngine(
+                    reopened_buffer,
+                    RowCodec(),
+                    reopened_file,
+                )
+                try:
+                    restored = CatalogManager.bootstrap_or_load(
+                        reopened_storage,
+                        False,
+                    )
+                    restored_student = restored.find_table("student")
+                    restored_replacement = restored.find_table("replacement")
+                    self.assertEqual(
+                        [record.values for record in reopened_storage.scan_rows(
+                            restored_student
+                        )],
+                        [rows[0]],
+                    )
+                    self.assertEqual(
+                        [record.values for record in reopened_storage.scan_rows(
+                            restored_replacement
+                        )],
+                        [fresh_row],
+                    )
+                    self.assertEqual(
+                        restored_replacement.ref.root_page_id,
+                        row_ids[2].page_id,
+                    )
+                finally:
+                    reopened_storage.close()
+
+    def test_catalog_spanning_pages_is_fully_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog-pages.db"
+            columns = tuple(
+                ColumnDef(
+                    f"column_{index:02d}_{'x' * 45}",
+                    DataType.INT if index % 2 == 0 else DataType.VARCHAR,
+                )
+                for index in range(64)
+            )
+            wide_schema = Schema(columns)
+
+            file_manager = FileManager.open(str(path))
+            buffer = BufferPool(file_manager, capacity=2, policy="fifo")
+            storage = StorageEngine(buffer, RowCodec(), file_manager)
+            catalog = CatalogManager.bootstrap_or_load(storage, True)
+            location = span("CREATE TABLE wide_table(column_00_x INT);")
+            Executor().execute(
+                CreateTablePlan("wide_table", wide_schema, location),
+                ExecutionContext(catalog, storage),
+            )
+            table = catalog.find_table("wide_table")
+            catalog_records = list(storage.scan_rows(SYSTEM_CATALOG_TABLE))
+            self.assertEqual(len(catalog_records), len(columns))
+            self.assertGreater(
+                len({record.row_id.page_id for record in catalog_records}),
+                1,
+            )
+            storage.close()
+
+            reopened_file = FileManager.open(str(path))
+            reopened_buffer = BufferPool(
+                reopened_file,
+                capacity=2,
+                policy="fifo",
+            )
+            reopened_storage = StorageEngine(
+                reopened_buffer,
+                RowCodec(),
+                reopened_file,
+            )
+            try:
+                restored = CatalogManager.bootstrap_or_load(reopened_storage, False)
+                self.assertEqual(restored.find_table("wide_table"), table)
+                restored_records = list(
+                    reopened_storage.scan_rows(SYSTEM_CATALOG_TABLE)
+                )
+                self.assertEqual(len(restored_records), len(columns))
+                self.assertGreater(
+                    len({record.row_id.page_id for record in restored_records}),
+                    1,
+                )
+            finally:
+                reopened_storage.close()
 
     def test_capacity_one_cross_page_rows_survive_reopen(self):
         with tempfile.TemporaryDirectory() as directory:
