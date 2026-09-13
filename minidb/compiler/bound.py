@@ -36,6 +36,15 @@ class BoundLiteral:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundAssignment:
+    """UPDATE 的一项赋值，column_index 针对目标表原始 Schema。"""
+
+    column_index: int
+    value: BoundExpr
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
 class BoundUnary:
     """绑定后的一元 NOT 节点，operand 是子条件，op_span 定位 NOT 本身。"""
     op: ExprOp
@@ -94,4 +103,14 @@ class BoundDelete:
     span: SourceSpan
 
 
-BoundStatement = BoundCreate | BoundInsert | BoundSelect | BoundDelete
+@dataclass(frozen=True, slots=True)
+class BoundUpdate:
+    """绑定后的 UPDATE；执行器在同一条旧行快照上计算所有赋值。"""
+
+    table: TableDef
+    assignments: tuple[BoundAssignment, ...]
+    predicate: BoundExpr | None
+    span: SourceSpan
+
+
+BoundStatement = BoundCreate | BoundInsert | BoundSelect | BoundDelete | BoundUpdate

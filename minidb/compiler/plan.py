@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from minidb.compiler._checks import Check
-from minidb.compiler.bound import BoundExpr
+from minidb.compiler.bound import (
+    BoundAssignment,
+    BoundBinary,
+    BoundColumn,
+    BoundExpr,
+    BoundLiteral,
+    BoundUnary,
+)
 from minidb.compiler.bound_validation import validate_predicate
 from minidb.core.schema import Schema, TableDef
 
@@ -64,13 +71,23 @@ class DeletePlan:
     span: SourceSpan
 
 
-Plan = CreateTablePlan | InsertPlan | SeqScanPlan | FilterPlan | ProjectPlan | DeletePlan
+@dataclass(frozen=True, slots=True)
+class UpdatePlan:
+    """批量 UPDATE 计划；child 只提供完整旧行和 RowId，不缓存新值。"""
+
+    table: TableDef
+    child: SeqScanPlan | FilterPlan
+    assignments: tuple[BoundAssignment, ...]
+    span: SourceSpan
+
+
+Plan = CreateTablePlan | InsertPlan | SeqScanPlan | FilterPlan | ProjectPlan | DeletePlan | UpdatePlan
 
 
 def validate_plan(plan: Plan) -> None:
     """公开执行根仅允许 Create、Insert、Project、Delete；不读数据页。"""
     check = Check("validate_plan", plan=True)
-    check.require(isinstance(plan, (CreateTablePlan, InsertPlan, ProjectPlan, DeletePlan)), "root", "完整的执行计划根节点", type(plan).__name__)
+    check.require(isinstance(plan, (CreateTablePlan, InsertPlan, ProjectPlan, DeletePlan, UpdatePlan)), "root", "完整的执行计划根节点", type(plan).__name__)
     check.span(plan.span)
     if isinstance(plan, CreateTablePlan):
         check.name(plan.table_name)
@@ -82,9 +99,13 @@ def validate_plan(plan: Plan) -> None:
         table = _validate_stream(plan.child, check, plan.span)
         if isinstance(plan, ProjectPlan):
             check.projection(table, plan.column_indexes, plan.output_columns)
-        else:
+        elif isinstance(plan, DeletePlan):
             check.table(plan.table)
             check.require(plan.table == table, "table", "与删除输入的扫描表一致", repr(plan.table.ref))
+        else:
+            check.table(plan.table)
+            check.require(plan.table == table, "table", "与更新输入的扫描表一致", repr(plan.table.ref))
+            _validate_assignments(plan.assignments, table, check)
 
 
 def _validate_stream(node, check: Check, parent) -> TableDef:
@@ -107,3 +128,41 @@ def _validate_stream(node, check: Check, parent) -> TableDef:
     for filtered in reversed(filters):
         validate_predicate(filtered.predicate, node.table, check, filtered.span)
     return node.table
+
+
+def _validate_assignments(assignments, table: TableDef, check: Check) -> None:
+    """拒绝空、重复、越界赋值；值表达式的类型由绑定阶段统一校验。"""
+    check.require(
+        isinstance(assignments, tuple) and bool(assignments),
+        "assignments",
+        "非空 tuple[BoundAssignment, ...]",
+        repr(assignments),
+    )
+    seen: set[int] = set()
+    for index, assignment in enumerate(assignments):
+        check.require(
+            isinstance(assignment, BoundAssignment),
+            f"assignments[{index}]",
+            "BoundAssignment",
+            type(assignment).__name__,
+        )
+        check.require(
+            type(assignment.column_index) is int
+            and 0 <= assignment.column_index < len(table.schema.columns),
+            f"assignments[{index}].column_index",
+            "有效列序号",
+            assignment.column_index,
+        )
+        check.require(
+            assignment.column_index not in seen,
+            f"assignments[{index}].column_index",
+            "每列最多赋值一次",
+            assignment.column_index,
+        )
+        check.require(
+            isinstance(assignment.value, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary)),
+            f"assignments[{index}].value",
+            "BoundExpr",
+            type(assignment.value).__name__,
+        )
+        seen.add(assignment.column_index)

@@ -17,6 +17,23 @@ _LOG = logging.getLogger(__name__)
 _T = TypeVar('_T')
 
 
+@dataclass(frozen=True, slots=True)
+class PageSnapshot:
+    """一张页的不可变读快照；revision 不写入磁盘。"""
+
+    page_id: int
+    data: bytes
+    revision: int
+
+    def __post_init__(self) -> None:
+        if type(self.page_id) is not int or self.page_id < 0:
+            raise ValueError("page_id must be a non-negative int")
+        if type(self.data) is not bytes or len(self.data) != PAGE_SIZE:
+            raise ValueError("data must be exactly one page of bytes")
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("revision must be a non-negative int")
+
+
 @dataclass(slots=True)
 class _Frame:
     data: bytes
@@ -42,6 +59,8 @@ class BufferPool:
         self._requests = self._hits = self._misses = 0
         self._evictions = self._writebacks = 0
         self._failure: errors.DbError | None = None
+        self._epoch = 0
+        self._page_revisions: dict[int, int] = {}
 
     @property
     def file_manager(self) -> FileManager:
@@ -99,6 +118,7 @@ class BufferPool:
         # 先分配，页号耗尽时不会无谓淘汰缓存。后续失败须终止会话，不承诺回滚。
         page_id = self._disk(self._file_manager.allocate_page)
         self._make_room('new_page')
+        self._bump_revision(page_id)
         self._frames[page_id] = _Frame(bytes(PAGE_SIZE), True)
         self._replacement.record_access(page_id)
         return page_id
@@ -137,12 +157,14 @@ class BufferPool:
         self._file_manager.validate_page_id(page_id)
         if page_id not in self._frames:
             self._make_room('write_page')
+        self._bump_revision(page_id)
         self._frames[page_id] = _Frame(memoryview(data).tobytes(), True)
         self._replacement.record_access(page_id)
 
     def free_page(self, page_id: int) -> None:
         self._ready()
         self._file_manager.validate_page_id(page_id, for_release=True)
+        self._bump_revision(page_id)
         frame = self._frames.pop(page_id, None)
         self._replacement.remove(page_id)
         self._disk(self._file_manager.release_page, page_id)
@@ -158,6 +180,60 @@ class BufferPool:
         self._ready()
         for page_id in sorted(self._frames):
             self._writeback(page_id, 'flush_all')
+
+    def get_snapshot(self, page_id: int) -> PageSnapshot:
+        """读取一次页面并附带会话内 revision。"""
+        data = self.get_page(page_id)
+        return PageSnapshot(page_id, data, self._revision(page_id))
+
+    def write_if_current(self, snapshot: PageSnapshot, data: bytes) -> None:
+        """仅当快照仍是当前版本时写入；过期时不修改缓存和统计。"""
+        self._ready()
+        if not isinstance(snapshot, PageSnapshot):
+            raise errors.DbError(
+                errors.ErrorStage.STORAGE,
+                errors.INVALID_ARGUMENT,
+                'write_if_current 需要 PageSnapshot',
+                context={'operation': 'write_if_current', 'field': 'snapshot',
+                         'expected': 'PageSnapshot', 'actual': type(snapshot).__name__},
+            )
+        if type(data) is not bytes or len(data) != PAGE_SIZE:
+            raise errors.DbError(
+                errors.ErrorStage.STORAGE,
+                errors.INVALID_ARGUMENT,
+                '写缓存必须提交完整的 4096 字节 bytes',
+                context={'operation': 'write_if_current', 'field': 'data',
+                         'expected': '4096 bytes',
+                         'actual': type(data).__name__ if type(data) is not bytes else len(data)},
+            )
+        self._file_manager.validate_page_id(snapshot.page_id)
+        actual_revision = self._revision(snapshot.page_id)
+        if actual_revision != snapshot.revision:
+            raise errors.DbError(
+                errors.ErrorStage.STORAGE,
+                errors.STALE_PAGE,
+                '页面快照已经过期',
+                context={'operation': 'write_if_current', 'page_id': snapshot.page_id,
+                         'expected_revision': snapshot.revision,
+                         'actual_revision': actual_revision},
+            )
+        if snapshot.page_id not in self._frames:
+            self._make_room('write_if_current')
+        self._bump_revision(snapshot.page_id)
+        self._frames[snapshot.page_id] = _Frame(memoryview(data).tobytes(), True)
+        self._replacement.record_access(snapshot.page_id)
+
+    def invalidate_all(self) -> None:
+        """丢弃缓存副本而不写盘，并使所有旧快照失效。"""
+        self._epoch += 1
+        self._frames.clear()
+        self._replacement = ReplacementPolicy(self._replacement.policy)
+
+    def _revision(self, page_id: int) -> int:
+        return (self._epoch << 64) | self._page_revisions.get(page_id, 0)
+
+    def _bump_revision(self, page_id: int) -> None:
+        self._page_revisions[page_id] = self._page_revisions.get(page_id, 0) + 1
 
     def stats(self) -> BufferStats:
         # 失败后仍可取统计证据，不触发磁盘操作或重新尝试写入。

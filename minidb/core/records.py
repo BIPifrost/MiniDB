@@ -7,6 +7,7 @@ compiler, row codec, storage engine, catalog and executor.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, TypeAlias, runtime_checkable
 
 
@@ -76,6 +77,62 @@ class StoredRow:
         if not isinstance(self.row_id, RowId):
             raise TypeError("row_id must be a RowId")
         _validate_row(self.values, field_name="values")
+
+
+class WriteKind(Enum):
+    """物理写入动作，用于把表页变化交给索引和事务层。"""
+
+    INSERT = "INSERT"
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+
+
+@dataclass(frozen=True, slots=True)
+class RowMovement:
+    """一条记录在物理层的身份变化；None 表示插入或删除的一端。"""
+
+    kind: WriteKind
+    old: RowId | None
+    new: RowId | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, WriteKind):
+            raise TypeError("kind must be a WriteKind")
+        if self.kind is WriteKind.INSERT and (self.old is not None or self.new is None):
+            raise ValueError("INSERT movement requires only new RowId")
+        if self.kind is WriteKind.UPDATE and (self.old is None or self.new is None):
+            raise ValueError("UPDATE movement requires old and new RowId")
+        if self.kind is WriteKind.DELETE and (self.old is None or self.new is not None):
+            raise ValueError("DELETE movement requires only old RowId")
+        for value in (self.old, self.new):
+            if value is not None and not isinstance(value, RowId):
+                raise TypeError("movement identities must be RowId or None")
+
+
+@dataclass(frozen=True, slots=True)
+class RowUpdate:
+    """批量 UPDATE 的单行输入；old 是准备阶段读取的完整旧值。"""
+
+    old: StoredRow
+    new_values: Row
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.old, StoredRow):
+            raise TypeError("old must be a StoredRow")
+        _validate_row(self.new_values, field_name="new_values")
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateBatch:
+    """不可变更新批次；空批次合法并且不会产生页面副作用。"""
+
+    updates: tuple[RowUpdate, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.updates, tuple):
+            raise TypeError("updates must be a tuple")
+        if any(not isinstance(update, RowUpdate) for update in self.updates):
+            raise TypeError("updates must contain only RowUpdate values")
 
 
 @runtime_checkable

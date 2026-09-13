@@ -51,6 +51,7 @@ from minidb.core.errors import (
     ROW_VALUE_COUNT_MISMATCH,
     SLOT_ID_INVALID,
     STALE_ROW,
+    STALE_PAGE,
     TABLE_EXISTS,
     TABLE_NOT_FOUND,
     TYPE_MISMATCH,
@@ -93,9 +94,9 @@ class TestErrorStage(unittest.TestCase):
 class TestErrorCodes(unittest.TestCase):
     """验证错误码常量（工作计划第 15.12 节）。"""
 
-    def test_total_count_is_48(self):
-        """错误码共48个，包含v2物理记录代际失效。"""
-        self.assertEqual(len(ALL_ERROR_CODES), 48)
+    def test_total_count_is_49(self):
+        """错误码共49个，包含行代际和页快照失效。"""
+        self.assertEqual(len(ALL_ERROR_CODES), 49)
 
     def test_all_constants_are_in_all_error_codes(self):
         """每个导出的错误码常量都在 ALL_ERROR_CODES 中。"""
@@ -111,14 +112,14 @@ class TestErrorCodes(unittest.TestCase):
             ROW_TYPE_MISMATCH, ROW_VALUE_COUNT_MISMATCH, ROW_TOO_LARGE,
             ROW_CORRUPTED, ROW_ENCODING_ERROR,
             PAGE_ID_INVALID, PAGE_NOT_ALLOCATED, PAGE_ALREADY_FREE, RESERVED_PAGE,
-            SLOT_ID_INVALID, STALE_ROW, PAGE_CORRUPTED, DB_FORMAT_MISMATCH,
+            SLOT_ID_INVALID, STALE_ROW, STALE_PAGE, PAGE_CORRUPTED, DB_FORMAT_MISMATCH,
             DB_FILE_TRUNCATED,
             CATALOG_CORRUPTED, ID_EXHAUSTED,
             IO_OPEN_FAILED, IO_READ_FAILED, IO_WRITE_FAILED, IO_SYNC_FAILED,
             IO_CLOSE_FAILED,
             ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR,
         ]
-        self.assertEqual(len(constants), 48)
+        self.assertEqual(len(constants), 49)
         for code in constants:
             self.assertIn(code, ALL_ERROR_CODES, f"错误码 {code} 不在 ALL_ERROR_CODES 中")
 
@@ -127,8 +128,8 @@ class TestErrorCodes(unittest.TestCase):
             self.assertIsInstance(code, str)
 
     def test_no_duplicate_error_codes(self):
-        """frozenset自动去重，如果常量重复，数量会少于48。"""
-        # 已经通过test_total_count_is_48验证
+        """frozenset自动去重，如果常量重复，数量会少于49。"""
+        # 已经通过test_total_count_is_49验证
         pass
 
 
@@ -377,7 +378,8 @@ class TestErrorStageMapping(unittest.TestCase):
             ROW_TYPE_MISMATCH, ROW_VALUE_COUNT_MISMATCH, ROW_TOO_LARGE,
             ROW_CORRUPTED, ROW_ENCODING_ERROR,
             PAGE_ID_INVALID, PAGE_NOT_ALLOCATED, PAGE_ALREADY_FREE, RESERVED_PAGE,
-            SLOT_ID_INVALID, PAGE_CORRUPTED, DB_FORMAT_MISMATCH, DB_FILE_TRUNCATED,
+            SLOT_ID_INVALID, STALE_ROW, STALE_PAGE, PAGE_CORRUPTED,
+            DB_FORMAT_MISMATCH, DB_FILE_TRUNCATED,
             CATALOG_CORRUPTED, ID_EXHAUSTED,
             IO_OPEN_FAILED, IO_READ_FAILED, IO_WRITE_FAILED, IO_SYNC_FAILED,
             IO_CLOSE_FAILED, ACTIVE_SCAN, CLOSED,

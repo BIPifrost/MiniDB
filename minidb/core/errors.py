@@ -27,7 +27,7 @@ class ErrorStage(Enum):
 
 
 # ---------------------------------------------------------------------------
-# 错误码常量（工作计划第 15.12 节，共 47 个）
+# 错误码常量（工作计划第 15.12 节，当前共 49 个）
 # 使用模块级字符串常量，DbError.code 接受 str，传常量即可。
 # ---------------------------------------------------------------------------
 
@@ -78,6 +78,7 @@ PAGE_ALREADY_FREE = "PAGE_ALREADY_FREE"
 RESERVED_PAGE = "RESERVED_PAGE"
 SLOT_ID_INVALID = "SLOT_ID_INVALID"
 STALE_ROW = "STALE_ROW"
+STALE_PAGE = "STALE_PAGE"
 PAGE_CORRUPTED = "PAGE_CORRUPTED"
 DB_FORMAT_MISMATCH = "DB_FORMAT_MISMATCH"
 DB_FILE_TRUNCATED = "DB_FILE_TRUNCATED"
@@ -118,7 +119,7 @@ ALL_ERROR_CODES: frozenset[str] = frozenset({
     ROW_CORRUPTED, ROW_ENCODING_ERROR,
     # 页与文件
     PAGE_ID_INVALID, PAGE_NOT_ALLOCATED, PAGE_ALREADY_FREE, RESERVED_PAGE,
-    SLOT_ID_INVALID, STALE_ROW, PAGE_CORRUPTED, DB_FORMAT_MISMATCH, DB_FILE_TRUNCATED,
+    SLOT_ID_INVALID, STALE_ROW, STALE_PAGE, PAGE_CORRUPTED, DB_FORMAT_MISMATCH, DB_FILE_TRUNCATED,
     CATALOG_CORRUPTED, ID_EXHAUSTED,
     # I/O
     IO_OPEN_FAILED, IO_READ_FAILED, IO_WRITE_FAILED, IO_SYNC_FAILED,
@@ -170,6 +171,7 @@ ERROR_STAGE_BY_CODE: dict[str, ErrorStage] = {
     RESERVED_PAGE: ErrorStage.STORAGE,
     SLOT_ID_INVALID: ErrorStage.STORAGE,
     STALE_ROW: ErrorStage.STORAGE,
+    STALE_PAGE: ErrorStage.STORAGE,
     PAGE_CORRUPTED: ErrorStage.STORAGE,
     DB_FORMAT_MISMATCH: ErrorStage.STORAGE,
     DB_FILE_TRUNCATED: ErrorStage.STORAGE,
