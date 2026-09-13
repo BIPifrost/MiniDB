@@ -207,17 +207,17 @@ class DataPage:
         compact_space = self.header.free_end - DATA_PAGE_HEADER_SIZE - live_bytes
         return len(record) + slot_bytes <= compact_space
 
-    def insert(self, record: bytes) -> RowSlot | None:
+    def insert(self, encoded: bytes) -> RowSlot | None:
         """插入记录并返回slot_id；v2优先复用删除槽并在需要时压缩。"""
-        _validate_record(record)
-        if not self.can_insert(record):
+        _validate_record(encoded)
+        if not self.can_insert(encoded):
             return None
         candidate = DataPage(self.to_bytes(), page_id=self._page_id)
         reusable = candidate._reusable_slot_id()
-        required = len(record) + (0 if reusable is not None else RECORD_SLOT_SIZE)
+        required = len(encoded) + (0 if reusable is not None else RECORD_SLOT_SIZE)
         if required > candidate.available_space():
             candidate.compact()
-        row_slot = candidate._insert_contiguous(record, reusable)
+        row_slot = candidate._insert_contiguous(encoded, reusable)
         self._data = candidate._data
         self._parsed = candidate._parsed
         return row_slot
@@ -281,9 +281,9 @@ class DataPage:
         self._refresh()
         return True
 
-    def replace_record(self, slot_id: int, generation: int, record: bytes) -> bool:
+    def replace_record(self, slot_id: int, generation: int, encoded: bytes) -> bool:
         """替换活动记录；空间不足时返回False且原页面不变。"""
-        _validate_record(record)
+        _validate_record(encoded)
         if self.header.version != DATA_PAGE_VERSION_V2:
             _raise(
                 errors.INVALID_ARGUMENT,
@@ -296,7 +296,7 @@ class DataPage:
         if slot.state is SlotState.DELETED:
             self._stale_row(slot_id, generation, slot.generation, "replace_record")
         live_bytes = sum(
-            len(record)
+            len(encoded)
             if index == slot_id
             else candidate.length
             for index, candidate in enumerate(self.slots)
@@ -306,7 +306,7 @@ class DataPage:
             return False
 
         records = {
-            index: (record if index == slot_id else self.record(index))
+            index: (encoded if index == slot_id else self.record(index))
             for index, candidate in enumerate(self.slots)
             if candidate.state is SlotState.LIVE
         }

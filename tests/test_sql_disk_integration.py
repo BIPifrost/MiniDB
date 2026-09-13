@@ -1,4 +1,5 @@
 """SQL 文本至真实磁盘的集成测试；装配辅助函数不是正式 CLI/Session。"""
+from tests.fakes.file_bytes import read_file_bytes
 import json
 from pathlib import Path
 import subprocess
@@ -78,13 +79,13 @@ class SqlDiskIntegrationTests(unittest.TestCase):
                 execute_sql(storage, catalog, 'CREATE TABLE student(id INT, name VARCHAR, age INT);')
                 for sql, code in cases:
                     with self.subTest(sql=sql):
-                        before = path.read_bytes()
+                        before = read_file_bytes(fm)
                         stats = buffer.stats()
                         with self.assertRaises(errors.DbError) as caught:
                             execute_sql(storage, catalog, sql)
                         self.assertEqual(caught.exception.code, code)
                         self.assertIsNotNone(caught.exception.span)
-                        self.assertEqual(path.read_bytes(), before)
+                        self.assertEqual(read_file_bytes(fm), before)
                         self.assertEqual(buffer.stats(), stats)
                 execute_sql(storage, catalog, "INSERT INTO student(id,name,age) VALUES (1, 'valid', 20);")
                 self.assertEqual(execute_sql(storage, catalog, 'SELECT * FROM student;')[0].rows,

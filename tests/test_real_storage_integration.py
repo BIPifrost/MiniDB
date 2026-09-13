@@ -1,4 +1,5 @@
 """真实目录、数据页、编码、缓存与文件的集成测试，不使用内存替身。"""
+from tests.fakes.file_bytes import read_file_bytes
 import json
 from pathlib import Path
 import subprocess
@@ -89,7 +90,7 @@ class RealStorageIntegrationTests(unittest.TestCase):
                 row = ('x' * 4052,)
                 storage.insert_row(table, row)
                 storage.sync()
-                before, stats = path.read_bytes(), buffer.stats()
+                before, stats = read_file_bytes(fm), buffer.stats()
                 with patch.object(buffer, 'new_page', wraps=buffer.new_page) as allocate, \
                      patch.object(buffer, 'write_page', wraps=buffer.write_page) as write:
                     with self.assertRaises(errors.DbError) as caught:
@@ -98,7 +99,7 @@ class RealStorageIntegrationTests(unittest.TestCase):
                     allocate.assert_not_called()
                     write.assert_not_called()
                 self.assertEqual(buffer.stats(), stats)
-                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(read_file_bytes(fm), before)
                 self.assertEqual([r.values for r in storage.scan_rows(table)], [row])
                 storage.close()
             finally:

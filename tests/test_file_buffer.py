@@ -446,15 +446,16 @@ class FileManagerTests(unittest.TestCase):
             self.assert_code('INVALID_ARGUMENT', FileManager.open, value)
 
     def test_read_write_invalid_arguments_leave_file_unchanged(self):
+        from tests.fakes.file_bytes import read_file_bytes
         fm = self.open_db()
-        before = self.path.read_bytes()
+        before = read_file_bytes(fm)
         for value in (-1, True, 0xFFFFFFFF, '1'):
             self.assert_code('PAGE_ID_INVALID', fm.read_page, value)
         self.assert_code('PAGE_NOT_ALLOCATED', fm.read_page, 2)
         self.assert_code('RESERVED_PAGE', fm.write_page, 0, bytes(4096))
         for data in (bytes(4095), bytes(4097), bytearray(4096), None):
             self.assert_code('INVALID_ARGUMENT', fm.write_page, 1, data)
-        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(read_file_bytes(fm), before)
 
     def test_validate_is_readonly_and_flags_are_strict(self):
         from unittest.mock import patch
@@ -537,15 +538,15 @@ class FileManagerTests(unittest.TestCase):
         from minidb.storage.file_manager import FileManager
         fake = Mock(); fake.read.return_value = b''
         fake.close.side_effect = OSError('close failure')
-        with patch('builtins.open', return_value=fake):
+        lock = Mock(); lock.path = str(self.path); lock.handle = fake; lock.is_new = False
+        with patch('minidb.storage.file_manager.DatabaseLock.acquire', return_value=lock):
             error = self.assert_code('DB_FILE_TRUNCATED', FileManager.open, str(self.path))
         self.assertEqual(error.context['cleanup_errors'][0]['code'], 'IO_CLOSE_FAILED')
 
-    def test_read_after_external_truncation(self):
+    def test_read_after_injected_truncation(self):
         fm = self.open_db()
-        # Simulate a damaged file using a separate handle to our temporary file.
-        with self.path.open('r+b') as stream:
-            stream.truncate(4097)
+        # 独占句柄禁止外部截断；通过测试持有的原句柄注入损坏。
+        fm._handle.truncate(4097)
         self.assert_code('DB_FILE_TRUNCATED', fm.read_page, 1)
 
 

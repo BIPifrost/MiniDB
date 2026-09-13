@@ -11,6 +11,7 @@ import unittest
 
 from minidb.core.errors import (
     ALL_ERROR_CODES,
+    DATABASE_BUSY,
     ACTIVE_SCAN,
     CATALOG_CORRUPTED,
     CLOSED,
@@ -96,9 +97,9 @@ class TestErrorStage(unittest.TestCase):
 class TestErrorCodes(unittest.TestCase):
     """验证错误码常量（工作计划第 15.12 节）。"""
 
-    def test_total_count_is_51(self):
-        """错误码共51个，包含页快照和事务状态错误。"""
-        self.assertEqual(len(ALL_ERROR_CODES), 51)
+    def test_total_count_is_52(self):
+        """错误码共52个，包含页快照和事务状态错误。"""
+        self.assertEqual(len(ALL_ERROR_CODES), 52)
 
     def test_all_constants_are_in_all_error_codes(self):
         """每个导出的错误码常量都在 ALL_ERROR_CODES 中。"""
@@ -120,9 +121,9 @@ class TestErrorCodes(unittest.TestCase):
             CATALOG_CORRUPTED, ID_EXHAUSTED,
             IO_OPEN_FAILED, IO_READ_FAILED, IO_WRITE_FAILED, IO_SYNC_FAILED,
             IO_CLOSE_FAILED,
-            ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR,
+            ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR, DATABASE_BUSY,
         ]
-        self.assertEqual(len(constants), 51)
+        self.assertEqual(len(constants), 52)
         for code in constants:
             self.assertIn(code, ALL_ERROR_CODES, f"错误码 {code} 不在 ALL_ERROR_CODES 中")
 
@@ -131,8 +132,8 @@ class TestErrorCodes(unittest.TestCase):
             self.assertIsInstance(code, str)
 
     def test_no_duplicate_error_codes(self):
-        """frozenset自动去重，如果常量重复，数量会少于51。"""
-        # 已经通过test_total_count_is_51验证
+        """frozenset自动去重，如果常量重复，数量会少于52。"""
+        # 已经通过test_total_count_is_52验证
         pass
 
 

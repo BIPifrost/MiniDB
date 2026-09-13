@@ -20,6 +20,7 @@ from minidb.core.disk_types import (
     INVALID_PAGE_ID,
     MAX_PAGE_ID,
     PAGE_SIZE,
+    PageSnapshot,
 )
 from minidb.core.records import Row, RowId, RowScan, StoredRow
 from minidb.core.schema import TableDef
@@ -48,6 +49,10 @@ class _BufferPoolLike(Protocol):
     def get_page(self, page_id: int) -> bytes: ...
 
     def write_page(self, page_id: int, data: bytes) -> None: ...
+
+    def get_snapshot(self, page_id: int) -> PageSnapshot: ...
+
+    def write_if_current(self, snapshot: PageSnapshot, data: bytes) -> None: ...
 
     def free_page(self, page_id: int) -> None: ...
 
@@ -150,7 +155,8 @@ class StorageEngine:
         _require_methods(
             buffer_pool,
             "buffer_pool",
-            ("new_page", "get_page", "write_page", "free_page", "flush_all"),
+            ("new_page", "get_page", "write_page", "get_snapshot", "write_if_current",
+             "free_page", "flush_all"),
         )
         _require_methods(
             row_codec,
@@ -220,7 +226,8 @@ class StorageEngine:
                 actual=repr(getattr(self._file_manager, "is_new", None)),
             )
 
-        reserved = self._buffer.get_page(CATALOG_ROOT_PAGE_ID)
+        reserved_snapshot = self._buffer.get_snapshot(CATALOG_ROOT_PAGE_ID)
+        reserved = reserved_snapshot.data
         if type(reserved) is not bytes or reserved != bytes(PAGE_SIZE):
             _error(
                 errors.PAGE_CORRUPTED,
@@ -236,7 +243,7 @@ class StorageEngine:
                 ),
             )
         page = DataPage.empty(0, page_id=CATALOG_ROOT_PAGE_ID)
-        self._buffer.write_page(CATALOG_ROOT_PAGE_ID, page.to_bytes())
+        self._buffer.write_if_current(reserved_snapshot, page.to_bytes())
 
     def validate_table_root(self, table: TableDef) -> None:
         """读取真实根页，确认格式和 table_id 与 TableDef 一致。"""
@@ -274,11 +281,12 @@ class StorageEngine:
             )
 
         tail_id = formal.ref.root_page_id
-        for page_id, page in self._walk_pages(formal):
+        for snapshot, page in self._walk_pages(formal):
+            page_id = snapshot.page_id
             tail_id = page_id
             row_slot = page.insert(encoded)
             if row_slot is not None:
-                self._buffer.write_page(page_id, page.to_bytes())
+                self._buffer.write_if_current(snapshot, page.to_bytes())
                 return RowId(page_id, row_slot.slot_id, row_slot.generation)
 
         # 所有旧页都放不下时才扩页。先写好新页，再把旧尾页连向它；
@@ -297,7 +305,7 @@ class StorageEngine:
         self._buffer.write_page(new_page_id, new_page.to_bytes())
 
         # 重新获取尾页的最新副本，避免用遍历时保留的旧副本覆盖其他字段。
-        tail = self._read_table_page(formal, tail_id)
+        tail_snapshot, tail = self._read_table_snapshot(formal, tail_id)
         if tail.header.next_page_id != INVALID_PAGE_ID:
             _error(
                 errors.PAGE_CORRUPTED,
@@ -307,7 +315,7 @@ class StorageEngine:
                 next_page_id=tail.header.next_page_id,
             )
         tail.set_next_page_id(new_page_id)
-        self._buffer.write_page(tail_id, tail.to_bytes())
+        self._buffer.write_if_current(tail_snapshot, tail.to_bytes())
         return RowId(new_page_id, row_slot.slot_id, row_slot.generation)
 
     def scan_rows(self, table: TableDef) -> RowScan:
@@ -339,7 +347,8 @@ class StorageEngine:
                 actual=type(row_id).__name__,
             )
 
-        for page_id, page in self._walk_pages(formal):
+        for snapshot, page in self._walk_pages(formal):
+            page_id = snapshot.page_id
             if page_id != row_id.page_id:
                 continue
             record = page.record(row_id.slot_id, row_id.generation)
@@ -377,12 +386,13 @@ class StorageEngine:
                 actual=type(row_id).__name__,
             )
 
-        for page_id, page in self._walk_pages(formal):
+        for snapshot, page in self._walk_pages(formal):
+            page_id = snapshot.page_id
             if page_id != row_id.page_id:
                 continue
             changed = page.delete(row_id.slot_id, row_id.generation)
             if changed:
-                self._buffer.write_page(page_id, page.to_bytes())
+                self._buffer.write_if_current(snapshot, page.to_bytes())
             return changed
         _error(
             errors.INVALID_ARGUMENT,
@@ -398,11 +408,11 @@ class StorageEngine:
         self._require_mutable("reclaim_empty_pages")
         formal = _validate_table(table, "reclaim_empty_pages")
         root_id = formal.ref.root_page_id
-        root = self._read_table_page(formal, root_id)
+        root_snapshot, root = self._read_table_snapshot(formal, root_id)
 
         if root.header.live_count == 0 and root.header.slot_count:
             root.reset_records()
-            self._buffer.write_page(root_id, root.to_bytes())
+            self._buffer.write_if_current(root_snapshot, root.to_bytes())
 
         released = 0
         visited = {root_id}
@@ -419,7 +429,7 @@ class StorageEngine:
 
             # 必须先让表链绕过当前页，再释放物理页。连续空页时，
             # previous_id 可能保持不变，因此每次都重新读取最新前驱页。
-            previous = self._read_table_page(formal, previous_id)
+            previous_snapshot, previous = self._read_table_snapshot(formal, previous_id)
             if previous.header.next_page_id != current_id:
                 _error(
                     errors.PAGE_CORRUPTED,
@@ -430,7 +440,7 @@ class StorageEngine:
                     actual=previous.header.next_page_id,
                 )
             previous.set_next_page_id(successor)
-            self._buffer.write_page(previous_id, previous.to_bytes())
+            self._buffer.write_if_current(previous_snapshot, previous.to_bytes())
             self._buffer.free_page(current_id)
             released += 1
             current_id = successor
@@ -462,14 +472,14 @@ class StorageEngine:
         self._file_manager.close()
         self._closed = True
 
-    def _walk_pages(self, table: TableDef) -> Iterator[tuple[int, DataPage]]:
+    def _walk_pages(self, table: TableDef) -> Iterator[tuple[PageSnapshot, DataPage]]:
         """从根页遍历整条链，同时检测循环和跨表页面。"""
         current_id = table.ref.root_page_id
         visited: set[int] = set()
         while current_id != INVALID_PAGE_ID:
-            page = self._read_table_page(table, current_id, visited)
+            snapshot, page = self._read_table_snapshot(table, current_id, visited)
             visited.add(current_id)
-            yield current_id, page
+            yield snapshot, page
             current_id = page.header.next_page_id
 
     def _read_table_page(
@@ -478,7 +488,13 @@ class StorageEngine:
         page_id: int,
         visited: set[int] | None = None,
     ) -> DataPage:
-        """统一读取并校验一张表页，给错误补充物理 page_id。"""
+        """只读调用不保留快照；计数仍为一次页读取。"""
+        return self._read_table_snapshot(table, page_id, visited)[1]
+
+    def _read_table_snapshot(
+        self, table: TableDef, page_id: int, visited: set[int] | None = None,
+    ) -> tuple[PageSnapshot, DataPage]:
+        """在同一次读取中取得数据和版本，不能写前才补取版本。"""
         if visited is not None and page_id in visited:
             _error(
                 errors.PAGE_CORRUPTED,
@@ -487,9 +503,9 @@ class StorageEngine:
                 table_id=table.ref.table_id,
                 page_id=page_id,
             )
-        data = self._buffer.get_page(page_id)
+        snapshot = self._buffer.get_snapshot(page_id)
         page = DataPage(
-            data,
+            snapshot.data,
             page_id=page_id,
             expected_table_id=table.ref.table_id,
         )
@@ -502,7 +518,7 @@ class StorageEngine:
                 expected_version=FORMAT_VERSION,
                 actual_version=page.header.version,
             )
-        return page
+        return snapshot, page
 
     def _scan_closed(self, scan: _PageRowScan) -> None:
         self._active_scans.discard(scan)

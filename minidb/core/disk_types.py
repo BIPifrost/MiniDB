@@ -23,6 +23,27 @@ MAX_NEXT_PAGE_ID: Final[int] = 0xFFFFFFFF
 
 
 @dataclass(frozen=True, slots=True)
+class PageSnapshot:
+    """不可变整页副本及会话内版本；不改变磁盘格式。
+
+    _owner 仅用于拒绝跨缓存误用，不是针对恶意 Python 调用者的安全机制。
+    手工构造的快照不能提交，业务调用者应使用 get_snapshot。
+    """
+    page_id: int
+    data: bytes
+    revision: int
+    _owner: object = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if type(self.page_id) is not int or not 1 <= self.page_id <= MAX_PAGE_ID:
+            raise ValueError('page_id must be an ordinary page id')
+        if type(self.data) is not bytes or len(self.data) != PAGE_SIZE:
+            raise ValueError('data must be 4096 bytes')
+        if type(self.revision) is not int or self.revision < 1:
+            raise ValueError('revision must be a positive int')
+
+
+@dataclass(frozen=True, slots=True)
 class BufferStats:
     """Immutable snapshot of one BufferPool's lifetime counters.
 

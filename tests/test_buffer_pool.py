@@ -1,4 +1,5 @@
 """真实页缓存契约测试，数据库文件均位于临时目录。"""
+from tests.fakes.file_bytes import read_file_bytes
 import json
 import logging
 import tempfile
@@ -108,11 +109,11 @@ class BufferPoolTests(unittest.TestCase):
                  (pool.flush_page, (999,), errors.PAGE_NOT_ALLOCATED),
                  (pool.write_page, (self.pages[1], bytes(4095)), errors.INVALID_ARGUMENT),
                  (pool.write_page, (a, bytearray(4096)), errors.INVALID_ARGUMENT)]
-        before = (self.path.read_bytes(), pool.stats(), pool._replacement.snapshot(), pool._frames[a].data)
+        before = (read_file_bytes(self.fm), pool.stats(), pool._replacement.snapshot(), pool._frames[a].data)
         for fn, args, code in cases:
             with self.subTest(fn=fn.__name__, args=args[:1]):
                 self.assert_code(code, fn, *args)
-                self.assertEqual((self.path.read_bytes(), pool.stats(), pool._replacement.snapshot(), pool._frames[a].data), before)
+                self.assertEqual((read_file_bytes(self.fm), pool.stats(), pool._replacement.snapshot(), pool._frames[a].data), before)
 
     def test_flush_sorted_idempotent_no_order_change_and_no_fsync(self):
         a, b, c, _ = self.pages; pool = BufferPool(self.fm, 3)

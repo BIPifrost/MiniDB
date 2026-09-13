@@ -123,16 +123,16 @@ class RowUpdate:
 class UpdateBatch:
     """不可变更新批次；空批次合法并且不会产生页面副作用。"""
 
-    updates: tuple[RowUpdate, ...]
+    items: tuple[RowUpdate, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.updates, tuple):
-            raise TypeError("updates must be a tuple")
-        if any(not isinstance(update, RowUpdate) for update in self.updates):
-            raise TypeError("updates must contain only RowUpdate values")
-        row_ids = [update.row_id for update in self.updates]
+        if not isinstance(self.items, tuple):
+            raise TypeError("items must be a tuple")
+        if any(not isinstance(update, RowUpdate) for update in self.items):
+            raise TypeError("items must contain only RowUpdate values")
+        row_ids = [update.row_id for update in self.items]
         if len(set(row_ids)) != len(row_ids):
-            raise ValueError("updates must not contain duplicate row_id values")
+            raise ValueError("items must not contain duplicate row_id values")
 
 
 @runtime_checkable

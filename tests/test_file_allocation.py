@@ -1,4 +1,5 @@
 """页分配、回收、复用及独立进程重开测试；仅操作临时数据库。"""
+from tests.fakes.file_bytes import read_file_bytes
 import json
 import subprocess
 import sys
@@ -47,7 +48,7 @@ class FileAllocationTests(unittest.TestCase):
         size = self.path.stat().st_size
         self.fm.release_page(a)
         self.fm.release_page(b)
-        raw = self.path.read_bytes()
+        raw = read_file_bytes(self.fm)
         self.assertEqual(raw[b*PAGE_SIZE:(b+1)*PAGE_SIZE], encode_free_page(a, next_page_id=5))
         self.assertEqual(raw[a*PAGE_SIZE:(a+1)*PAGE_SIZE], encode_free_page(next_page_id=5))
         self.assertEqual(self.fm.allocate_page(), b)
@@ -64,12 +65,12 @@ class FileAllocationTests(unittest.TestCase):
                             (True, errors.PAGE_ID_INVALID), (-1, errors.PAGE_ID_INVALID),
                             (INVALID_PAGE_ID, errors.PAGE_ID_INVALID),
                             (3, errors.PAGE_NOT_ALLOCATED), (page, errors.PAGE_ALREADY_FREE)):
-            before = self.path.read_bytes()
+            before = read_file_bytes(self.fm)
             old_header = self.fm._header
             free = set(self.fm._free_pages)
             with self.subTest(value=value):
                 self.assert_code(code, self.fm.release_page, value)
-                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(read_file_bytes(self.fm), before)
                 self.assertEqual(self.fm._header, old_header)
                 self.assertEqual(self.fm._free_pages, free)
 

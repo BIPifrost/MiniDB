@@ -15,6 +15,8 @@ from typing import Protocol
 
 from minidb.core.disk_types import BufferStats, PAGE_SIZE
 from minidb.storage.replacement import ReplacementPolicy
+from minidb.storage._page_versions import PageVersions
+from minidb.core.disk_types import PageSnapshot
 
 
 class FileManagerLike(Protocol):
@@ -168,6 +170,7 @@ class InMemoryBufferPool:
         self._capacity = capacity
         self._policy = policy
         self._frames: dict[int, _Frame] = {}
+        self._versions = PageVersions()
         self._replacement = ReplacementPolicy(policy)
         self._requests = 0
         self._hits = 0
@@ -189,6 +192,7 @@ class InMemoryBufferPool:
 
     def new_page(self) -> int:
         page_id = self._file_manager.allocate_page()
+        self._versions.changed(page_id)
         self._make_room()
         self._frames[page_id] = _Frame(bytes(PAGE_SIZE), dirty=True)
         self._replacement.record_access(page_id)
@@ -212,6 +216,20 @@ class InMemoryBufferPool:
         self._replacement.record_access(page_id)
         return bytes(bytearray(data))
 
+    def get_snapshot(self, page_id: int) -> PageSnapshot:
+        return self._versions.snapshot(page_id, self.get_page(page_id))
+
+    def write_if_current(self, snapshot: PageSnapshot, data: bytes) -> None:
+        self._file_manager.validate_page_id(1)
+        self._versions.check(snapshot)
+        self.write_page(snapshot.page_id, data)
+
+    def invalidate_all(self) -> None:
+        self._file_manager.validate_page_id(1)
+        self._versions.invalidate_all()
+        self._frames.clear()
+        self._replacement = ReplacementPolicy(self._policy)
+
     def write_page(self, page_id: int, data: bytes) -> None:
         self._file_manager.validate_page_id(page_id)
         if not isinstance(data, bytes) or len(data) != PAGE_SIZE:
@@ -222,9 +240,11 @@ class InMemoryBufferPool:
         if frame is None:
             self._make_room()
             self._frames[page_id] = _Frame(copied, dirty=True)
+            self._versions.changed(page_id)
             self._replacement.record_access(page_id)
             return
 
+        self._versions.changed(page_id)
         frame.data = copied
         frame.dirty = True
         self._record_access(page_id)
@@ -236,6 +256,7 @@ class InMemoryBufferPool:
         self._frames.pop(page_id, None)
         self._replacement.remove(page_id)
         self._file_manager.release_page(page_id)
+        self._versions.changed(page_id)
 
     def flush_page(self, page_id: int) -> None:
         self._file_manager.validate_page_id(page_id)

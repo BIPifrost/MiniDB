@@ -1,12 +1,11 @@
 """Physical file I/O and page allocation for MiniDB format 1.
 
-Ordinary business page access must go through the future BufferPool. This
+Ordinary business page access must go through the BufferPool. This
 layer owns page 0 and free-list metadata. It does not validate DataPage slots.
 Errors use the shared core contract, also consumed by Schema and Catalog.
 """
 
 import os
-from pathlib import Path
 from typing import BinaryIO
 
 from minidb.core.disk_types import PAGE_SIZE, MAX_PAGE_ID, INVALID_PAGE_ID
@@ -16,13 +15,15 @@ from minidb.storage.page import (
 )
 # 使用已移到公共目录的同一套错误定义，目录层可以直接识别底层异常。
 from minidb.core import errors
+from minidb.storage.file_lock import DatabaseLock
 
 
 class FileManager:
-    def __init__(self, path: str, handle: BinaryIO, *, is_new: bool) -> None:
+    def __init__(self, path: str, handle: BinaryIO, *, is_new: bool, lock: DatabaseLock | None = None) -> None:
         # Internal construction only; use open() for initialization/validation.
         self._path = path
         self._handle = handle
+        self._lock = lock
         self._is_new = is_new
         self._closed = False
         self._header = FileHeader()
@@ -45,28 +46,10 @@ class FileManager:
                                  'path must be a nonempty string without NUL',
                                  context={'operation': 'open', 'field': 'path',
                                           'expected': 'nonempty path str', 'actual': repr(path)})
-        actual_path = os.path.abspath(path)
-        handle = None
-        is_new = False
+        lock = DatabaseLock.acquire(path)
+        manager = cls(lock.path, lock.handle, is_new=lock.is_new, lock=lock)
         try:
-            try:
-                handle = open(actual_path, 'r+b', buffering=0)
-            except FileNotFoundError:
-                Path(actual_path).parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    handle = open(actual_path, 'x+b', buffering=0)
-                    is_new = True
-                except FileExistsError:
-                    # Another creator won the race; never truncate its file.
-                    handle = open(actual_path, 'r+b', buffering=0)
-        except OSError as exc:
-            raise errors.DbError(errors.ErrorStage.STORAGE, errors.IO_OPEN_FAILED,
-                                 'Cannot open database file',
-                                 context={'path': actual_path, 'operation': 'open',
-                                          'cause': str(exc)}) from exc
-        manager = cls(actual_path, handle, is_new=is_new)
-        try:
-            if is_new:
+            if manager.is_new:
                 manager._write_raw(0, initial_file_header_page())
                 manager._write_raw(1, bytes(PAGE_SIZE))
             manager._load_metadata()
@@ -85,7 +68,7 @@ class FileManager:
             raise
 
     def _ensure_open(self, operation: str) -> None:
-        if self._closed:
+        if self._closed or self._handle.closed is True:
             raise self._error(errors.CLOSED, operation, resource='FileManager')
 
     def _read_raw(self, page_id: int) -> bytes:
@@ -235,6 +218,8 @@ class FileManager:
             return
         try:
             self._handle.close()
+            if self._lock is not None:
+                self._lock.close()
         except OSError as exc:
             # Do not falsely mark an unreleased handle as closed.
             raise self._error(errors.IO_CLOSE_FAILED, 'close', cause=str(exc)) from exc

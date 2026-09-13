@@ -2,6 +2,7 @@
 
 本文件不实现 StorageEngine，也不代表 DataPage 增删算法已经验收。
 """
+from tests.fakes.file_bytes import read_file_bytes
 import hashlib
 import json
 from pathlib import Path
@@ -82,7 +83,7 @@ class RowBufferIntegrationTests(unittest.TestCase):
         # 上层必须先编码再分配；这里只验证推荐的调用顺序，非 StorageEngine。
         pool = BufferPool(self.fm, 1)
         schema = Schema((ColumnDef('text', DataType.VARCHAR),))
-        before = self.path.read_bytes()
+        before = read_file_bytes(self.fm)
         with patch.object(pool, 'new_page', wraps=pool.new_page) as allocate:
             with patch.object(pool, 'write_page', wraps=pool.write_page) as write:
                 with self.assertRaises(errors.DbError) as caught:
@@ -91,7 +92,7 @@ class RowBufferIntegrationTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, errors.ROW_TOO_LARGE)
                 allocate.assert_not_called()
                 write.assert_not_called()
-        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(read_file_bytes(self.fm), before)
 
     def test_capacity_one_fresh_copy_preserves_record_and_link(self):
         pool = BufferPool(self.fm, 1)

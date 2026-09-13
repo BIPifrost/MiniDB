@@ -17,6 +17,7 @@ class TransactionState(Enum):
     READ_ONLY_STARTUP = "READ_ONLY_STARTUP"
     RECOVERY = "RECOVERY"
     IDLE = "IDLE"
+    PREPARING = "PREPARING"
     ACTIVE = "ACTIVE"
     COMMITTING = "COMMITTING"
     ROLLING_BACK = "ROLLING_BACK"
@@ -66,20 +67,18 @@ class TransactionGuard:
     ) -> None:
         allowed = (expected,) if isinstance(expected, TransactionState) else expected
         self.require(*allowed, operation=operation)
-        if not isinstance(target, TransactionState):
-            raise TypeError("target must be a TransactionState")
-        self._state = target
-        self._generation += 1
+        self.transition_to(target, operation=operation)
 
     def transition_to(
         self, target: TransactionState, *, operation: str = "TransactionGuard.transition_to"
     ) -> None:
         """按总计划接口从当前状态推进到 target。"""
         transitions = {
-            TransactionState.BOOTSTRAP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED},
-            TransactionState.READ_ONLY_STARTUP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED},
-            TransactionState.RECOVERY: {TransactionState.IDLE, TransactionState.FAILED},
-            TransactionState.IDLE: {TransactionState.ACTIVE, TransactionState.CLOSED, TransactionState.FAILED},
+            TransactionState.BOOTSTRAP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED, TransactionState.CLOSED},
+            TransactionState.READ_ONLY_STARTUP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED, TransactionState.CLOSED},
+            TransactionState.RECOVERY: {TransactionState.IDLE, TransactionState.FAILED, TransactionState.CLOSED},
+            TransactionState.IDLE: {TransactionState.PREPARING, TransactionState.CLOSED, TransactionState.FAILED},
+            TransactionState.PREPARING: {TransactionState.ACTIVE, TransactionState.FAILED},
             TransactionState.ACTIVE: {TransactionState.COMMITTING, TransactionState.ROLLING_BACK, TransactionState.FAILED},
             TransactionState.COMMITTING: {TransactionState.IDLE, TransactionState.FAILED},
             TransactionState.ROLLING_BACK: {TransactionState.IDLE, TransactionState.FAILED},
@@ -103,31 +102,14 @@ class TransactionGuard:
         self._generation += 1
 
     def fail(self, *, operation: str) -> None:
-        """任何不可继续错误都进入 FAILED，后续写入必须被拒绝。"""
-        self.require(
-            TransactionState.BOOTSTRAP,
-            TransactionState.READ_ONLY_STARTUP,
-            TransactionState.RECOVERY,
-            TransactionState.IDLE,
-            TransactionState.ACTIVE,
-            TransactionState.COMMITTING,
-            TransactionState.ROLLING_BACK,
-            operation=operation,
-        )
-        self._state = TransactionState.FAILED
-        self._generation += 1
+        """不可继续错误进入 FAILED；关闭后不能重新激活。"""
+        self.transition_to(TransactionState.FAILED, operation=operation)
 
     def close(self, *, operation: str = "TransactionGuard.close") -> None:
-        self.require(
-            TransactionState.BOOTSTRAP,
-            TransactionState.IDLE,
-            TransactionState.READ_ONLY_STARTUP,
-            TransactionState.RECOVERY,
-            TransactionState.FAILED,
-            operation=operation,
-        )
-        self._state = TransactionState.CLOSED
-        self._generation += 1
+        """关闭可重复；活动事务必须先完成提交、回滚或失败处理。"""
+        if self._state is TransactionState.CLOSED:
+            return
+        self.transition_to(TransactionState.CLOSED, operation=operation)
 
 
 __all__ = ["TransactionGuard", "TransactionState"]
