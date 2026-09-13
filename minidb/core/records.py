@@ -82,6 +82,8 @@ class StoredRow:
 class WriteKind(Enum):
     """物理写入动作，用于把表页变化交给索引和事务层。"""
 
+    CREATE_TABLE = "CREATE_TABLE"
+    CREATE_INDEX = "CREATE_INDEX"
     INSERT = "INSERT"
     UPDATE = "UPDATE"
     DELETE = "DELETE"
@@ -89,37 +91,32 @@ class WriteKind(Enum):
 
 @dataclass(frozen=True, slots=True)
 class RowMovement:
-    """一条记录在物理层的身份变化；None 表示插入或删除的一端。"""
+    """一条记录在物理层的变化；两端保存完整 StoredRow。"""
 
-    kind: WriteKind
-    old: RowId | None
-    new: RowId | None
+    old: StoredRow | None
+    new: StoredRow | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.kind, WriteKind):
-            raise TypeError("kind must be a WriteKind")
-        if self.kind is WriteKind.INSERT and (self.old is not None or self.new is None):
-            raise ValueError("INSERT movement requires only new RowId")
-        if self.kind is WriteKind.UPDATE and (self.old is None or self.new is None):
-            raise ValueError("UPDATE movement requires old and new RowId")
-        if self.kind is WriteKind.DELETE and (self.old is None or self.new is not None):
-            raise ValueError("DELETE movement requires only old RowId")
         for value in (self.old, self.new):
-            if value is not None and not isinstance(value, RowId):
-                raise TypeError("movement identities must be RowId or None")
+            if value is not None and not isinstance(value, StoredRow):
+                raise TypeError("movement values must be StoredRow or None")
+        if self.old is None and self.new is None:
+            raise ValueError("movement must contain an old or new row")
 
 
 @dataclass(frozen=True, slots=True)
 class RowUpdate:
-    """批量 UPDATE 的单行输入；old 是准备阶段读取的完整旧值。"""
+    """批量 UPDATE 的单行输入，字段与项目总计划保持一致。"""
 
-    old: StoredRow
-    new_values: Row
+    row_id: RowId
+    expected_old: Row
+    new_row: Row
 
     def __post_init__(self) -> None:
-        if not isinstance(self.old, StoredRow):
-            raise TypeError("old must be a StoredRow")
-        _validate_row(self.new_values, field_name="new_values")
+        if not isinstance(self.row_id, RowId):
+            raise TypeError("row_id must be a RowId")
+        _validate_row(self.expected_old, field_name="expected_old")
+        _validate_row(self.new_row, field_name="new_row")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +130,9 @@ class UpdateBatch:
             raise TypeError("updates must be a tuple")
         if any(not isinstance(update, RowUpdate) for update in self.updates):
             raise TypeError("updates must contain only RowUpdate values")
+        row_ids = [update.row_id for update in self.updates]
+        if len(set(row_ids)) != len(row_ids):
+            raise ValueError("updates must not contain duplicate row_id values")
 
 
 @runtime_checkable

@@ -60,6 +60,7 @@ class BufferPool:
         self._evictions = self._writebacks = 0
         self._failure: errors.DbError | None = None
         self._epoch = 0
+        self._revision_counter = 0
         self._page_revisions: dict[int, int] = {}
 
     @property
@@ -225,15 +226,17 @@ class BufferPool:
 
     def invalidate_all(self) -> None:
         """丢弃缓存副本而不写盘，并使所有旧快照失效。"""
-        self._epoch += 1
+        self._revision_counter += 1
+        self._epoch = self._revision_counter
         self._frames.clear()
         self._replacement = ReplacementPolicy(self._replacement.policy)
 
     def _revision(self, page_id: int) -> int:
-        return (self._epoch << 64) | self._page_revisions.get(page_id, 0)
+        return max(self._epoch, self._page_revisions.get(page_id, 0))
 
     def _bump_revision(self, page_id: int) -> None:
-        self._page_revisions[page_id] = self._page_revisions.get(page_id, 0) + 1
+        self._revision_counter += 1
+        self._page_revisions[page_id] = self._revision_counter
 
     def stats(self) -> BufferStats:
         # 失败后仍可取统计证据，不触发磁盘操作或重新尝试写入。

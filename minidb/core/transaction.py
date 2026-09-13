@@ -15,6 +15,7 @@ from minidb.core import errors
 class TransactionState(Enum):
     BOOTSTRAP = "BOOTSTRAP"
     READ_ONLY_STARTUP = "READ_ONLY_STARTUP"
+    RECOVERY = "RECOVERY"
     IDLE = "IDLE"
     ACTIVE = "ACTIVE"
     COMMITTING = "COMMITTING"
@@ -46,8 +47,8 @@ class TransactionGuard:
             raise ValueError("at least one allowed state is required")
         if self._state not in allowed:
             raise errors.DbError(
-                errors.ErrorStage.EXECUTION,
-                errors.INVALID_ARGUMENT,
+                errors.ErrorStage.STORAGE,
+                errors.INVALID_TRANSACTION_STATE,
                 "事务状态不允许执行当前操作",
                 context={
                     "operation": operation,
@@ -70,11 +71,43 @@ class TransactionGuard:
         self._state = target
         self._generation += 1
 
+    def transition_to(
+        self, target: TransactionState, *, operation: str = "TransactionGuard.transition_to"
+    ) -> None:
+        """按总计划接口从当前状态推进到 target。"""
+        transitions = {
+            TransactionState.BOOTSTRAP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED},
+            TransactionState.READ_ONLY_STARTUP: {TransactionState.IDLE, TransactionState.RECOVERY, TransactionState.FAILED},
+            TransactionState.RECOVERY: {TransactionState.IDLE, TransactionState.FAILED},
+            TransactionState.IDLE: {TransactionState.ACTIVE, TransactionState.CLOSED, TransactionState.FAILED},
+            TransactionState.ACTIVE: {TransactionState.COMMITTING, TransactionState.ROLLING_BACK, TransactionState.FAILED},
+            TransactionState.COMMITTING: {TransactionState.IDLE, TransactionState.FAILED},
+            TransactionState.ROLLING_BACK: {TransactionState.IDLE, TransactionState.FAILED},
+            TransactionState.FAILED: {TransactionState.CLOSED},
+            TransactionState.CLOSED: set(),
+        }
+        if not isinstance(target, TransactionState):
+            raise TypeError("target must be a TransactionState")
+        if target not in transitions[self._state]:
+            raise errors.DbError(
+                errors.ErrorStage.STORAGE,
+                errors.INVALID_TRANSACTION_STATE,
+                "事务状态转换不被允许",
+                context={
+                    "operation": operation,
+                    "actual_state": self._state.value,
+                    "target_state": target.value,
+                },
+            )
+        self._state = target
+        self._generation += 1
+
     def fail(self, *, operation: str) -> None:
         """任何不可继续错误都进入 FAILED，后续写入必须被拒绝。"""
         self.require(
             TransactionState.BOOTSTRAP,
             TransactionState.READ_ONLY_STARTUP,
+            TransactionState.RECOVERY,
             TransactionState.IDLE,
             TransactionState.ACTIVE,
             TransactionState.COMMITTING,
@@ -86,8 +119,10 @@ class TransactionGuard:
 
     def close(self, *, operation: str = "TransactionGuard.close") -> None:
         self.require(
+            TransactionState.BOOTSTRAP,
             TransactionState.IDLE,
             TransactionState.READ_ONLY_STARTUP,
+            TransactionState.RECOVERY,
             TransactionState.FAILED,
             operation=operation,
         )

@@ -77,9 +77,11 @@ class D2InterfaceTests(unittest.TestCase):
     def test_row_movement_and_empty_update_batch_have_stable_shapes(self):
         old = RowId(2, 0, 1)
         new = RowId(3, 0, 1)
-        self.assertEqual(RowMovement(WriteKind.UPDATE, old, new).new, new)
-        self.assertEqual(RowMovement(WriteKind.INSERT, None, new).old, None)
-        update = RowUpdate(StoredRow(old, (1, "Alice", 20)), (1, "Bob", 21))
+        old_row = StoredRow(old, (1, "Alice", 20))
+        new_row = StoredRow(new, (1, "Bob", 21))
+        self.assertEqual(RowMovement(old_row, new_row).new, new_row)
+        self.assertEqual(RowMovement(None, new_row).old, None)
+        update = RowUpdate(old, (1, "Alice", 20), (1, "Bob", 21))
         self.assertEqual(UpdateBatch((update,)).updates, (update,))
         self.assertEqual(UpdateBatch(()).updates, ())
 
