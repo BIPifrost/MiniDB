@@ -320,6 +320,49 @@ class StorageEngine:
         self._active_scans.add(scan)
         return scan
 
+    def fetch_row(self, table: TableDef, row_id: RowId) -> StoredRow:
+        """按完整 RowId 读取一行，并拒绝过期或不属于目标表的位置。
+
+        这是 UPDATE、索引回表和 RowMovement 校验共用的定点读取入口。它不
+        注册活动扫描，也不缓存可变页面副本；generation 校验始终由 DataPage
+        执行，因而删除槽被复用后旧 RowId 不会命中新记录。
+        """
+        self._require_open("fetch_row")
+        formal = _validate_table(table, "fetch_row")
+        if not isinstance(row_id, RowId):
+            _error(
+                errors.INVALID_ARGUMENT,
+                "row_id 必须是 RowId",
+                "fetch_row",
+                field="row_id",
+                expected="RowId",
+                actual=type(row_id).__name__,
+            )
+
+        for page_id, page in self._walk_pages(formal):
+            if page_id != row_id.page_id:
+                continue
+            record = page.record(row_id.slot_id, row_id.generation)
+            if record is None:
+                _error(
+                    errors.STALE_ROW,
+                    "RowId 指向的槽已删除或不再有效",
+                    "fetch_row",
+                    page_id=row_id.page_id,
+                    slot_id=row_id.slot_id,
+                    generation=row_id.generation,
+                )
+            return StoredRow(row_id, self._codec.decode(record, formal.schema))
+
+        _error(
+            errors.INVALID_ARGUMENT,
+            "RowId 指向的页不属于目标表",
+            "fetch_row",
+            table_id=formal.ref.table_id,
+            page_id=row_id.page_id,
+            slot_id=row_id.slot_id,
+        )
+
     def delete_row(self, table: TableDef, row_id: RowId) -> bool:
         """确认 RowId 位于目标表页链后，将有效槽标记为删除。"""
         self._require_mutable("delete_row")
