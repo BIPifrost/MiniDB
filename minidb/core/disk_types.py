@@ -6,6 +6,7 @@ All multi-byte disk fields use little-endian encoding (format version 1).
 
 from dataclasses import dataclass, field
 from typing import Final, TypeAlias
+from uuid import UUID
 
 PageId: TypeAlias = int
 
@@ -18,6 +19,13 @@ HEADER_PAGE_ID: Final[int] = 0
 CATALOG_ROOT_PAGE_ID: Final[int] = 1
 FIRST_ALLOCATABLE_PAGE_ID: Final[int] = 2
 INITIAL_NEXT_PAGE_ID: Final[int] = 2
+# v2 独立格式边界；现有 v1 入口仍使用上方无前缀常量。
+V2_FORMAT_VERSION: Final[int] = 2
+V2_INDEX_CATALOG_ROOT_PAGE_ID: Final[int] = 2
+V2_FIRST_ALLOCATABLE_PAGE_ID: Final[int] = 3
+V2_MAX_FILE_SIZE: Final[int] = 64 * 1024 * 1024
+V2_MAX_PAGE_COUNT: Final[int] = V2_MAX_FILE_SIZE // PAGE_SIZE
+
 # This is a boundary, not an allocated page: the sentinel is allowed here.
 MAX_NEXT_PAGE_ID: Final[int] = 0xFFFFFFFF
 
@@ -74,3 +82,35 @@ class BufferStats:
             raise ValueError("requests must equal hits + misses")
         rate = self.hits / self.requests if self.requests else 0.0
         object.__setattr__(self, "hit_rate", rate)
+
+
+@dataclass(frozen=True, slots=True)
+class FileImageInfo:
+    """主库镜像信息；事务 UUID 由上层日志管理者另行添加。"""
+    original_length: int
+    database_uuid: UUID
+    payload_sha256: bytes
+
+    def __post_init__(self) -> None:
+        if (type(self.original_length) is not int or
+                not 3 * PAGE_SIZE <= self.original_length <= V2_MAX_FILE_SIZE or
+                self.original_length % PAGE_SIZE):
+            raise ValueError('original_length must be a valid v2 file length')
+        if not isinstance(self.database_uuid, UUID):
+            raise TypeError('database_uuid must be UUID')
+        if type(self.payload_sha256) is not bytes or len(self.payload_sha256) != 32:
+            raise ValueError('payload_sha256 must contain 32 bytes')
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotInfo:
+    """文件镜像加事务身份；日志 sequence 单独保存，仅用于诊断。"""
+    original_length: int
+    database_uuid: UUID
+    transaction_uuid: UUID
+    payload_sha256: bytes
+
+    def __post_init__(self) -> None:
+        FileImageInfo(self.original_length, self.database_uuid, self.payload_sha256)
+        if not isinstance(self.transaction_uuid, UUID):
+            raise TypeError('transaction_uuid must be UUID')

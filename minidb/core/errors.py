@@ -27,7 +27,7 @@ class ErrorStage(Enum):
 
 
 # ---------------------------------------------------------------------------
-# 错误码常量（工作计划第 15.12 节，当前共 49 个）
+# 错误码常量（工作计划第 15.12 节，当前共 56 个）
 # 使用模块级字符串常量，DbError.code 接受 str，传常量即可。
 # ---------------------------------------------------------------------------
 
@@ -80,6 +80,10 @@ SLOT_ID_INVALID = "SLOT_ID_INVALID"
 STALE_ROW = "STALE_ROW"
 STALE_PAGE = "STALE_PAGE"
 DATABASE_BUSY = "DATABASE_BUSY"
+COMMIT_OUTCOME_UNKNOWN = "COMMIT_OUTCOME_UNKNOWN"
+RECOVERY_FAILED = "RECOVERY_FAILED"
+RESOURCE_LIMIT = "RESOURCE_LIMIT"
+FORMAT_VERSION_UNSUPPORTED = "FORMAT_VERSION_UNSUPPORTED"
 TRANSACTION_REQUIRED = "TRANSACTION_REQUIRED"
 INVALID_TRANSACTION_STATE = "INVALID_TRANSACTION_STATE"
 PAGE_CORRUPTED = "PAGE_CORRUPTED"
@@ -130,12 +134,17 @@ ALL_ERROR_CODES: frozenset[str] = frozenset({
     IO_CLOSE_FAILED,
     # 会话与资源
     ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR, DATABASE_BUSY,
+    RESOURCE_LIMIT, FORMAT_VERSION_UNSUPPORTED, RECOVERY_FAILED, COMMIT_OUTCOME_UNKNOWN,
 })
 
 
 # 固定错误码对应的发生阶段。INVALID_ARGUMENT 不放入此表：
 # 它表示调用参数不合法，阶段由具体公共接口所属模块决定。
 ERROR_STAGE_BY_CODE: dict[str, ErrorStage] = {
+    COMMIT_OUTCOME_UNKNOWN: ErrorStage.STORAGE,
+    RECOVERY_FAILED: ErrorStage.STORAGE,
+    RESOURCE_LIMIT: ErrorStage.EXECUTION,
+    FORMAT_VERSION_UNSUPPORTED: ErrorStage.STORAGE,
     # 输入读取与词法
     INPUT_INVALID_UTF8: ErrorStage.LEXICAL,
     INPUT_READ_FAILED: ErrorStage.LEXICAL,

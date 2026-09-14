@@ -7,3 +7,7 @@ data/*
 
 # 内核路径锁载体，不包含业务数据
 *.mdb2-lock
+
+# 本地事务快照日志与未发布临时日志
+*.mdb2-journal
+*.mdb2-journal.tmp

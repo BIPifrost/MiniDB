@@ -45,6 +45,18 @@ class BufferPool:
         self._requests = self._hits = self._misses = 0
         self._evictions = self._writebacks = 0
         self._failure: errors.DbError | None = None
+        file_manager._register_buffer_pool(self)
+
+    @property
+    def has_dirty_pages(self) -> bool:
+        return any(frame.dirty for frame in self._frames.values())
+
+    def _discard_for_restore(self) -> None:
+        """仅由同一 FileManager 的已校验恢复路径调用，不进行任何写回。"""
+        self._versions.invalidate_all()
+        self._frames.clear()
+        self._replacement = ReplacementPolicy(self._replacement.policy)
+        self._failure = None
 
     @property
     def file_manager(self) -> FileManager:
@@ -75,7 +87,7 @@ class BufferPool:
     def _writeback(self, page_id: int, reason: str) -> None:
         frame = self._frames[page_id]
         if frame.dirty:
-            self._disk(self._file_manager.write_page, page_id, frame.data)
+            self._disk(self._file_manager._writeback_page, page_id, frame.data)
             frame.dirty = False
             self._writebacks += 1
             self._event('WRITEBACK', page_id, True, reason)
@@ -99,6 +111,7 @@ class BufferPool:
 
     def new_page(self) -> int:
         self._ready()
+        self._file_manager._require_write('BufferPool.new_page')
         # 先分配，页号耗尽时不会无谓淘汰缓存。后续失败须终止会话，不承诺回滚。
         page_id = self._disk(self._file_manager.allocate_page)
         self._versions.changed(page_id)
@@ -152,6 +165,7 @@ class BufferPool:
         v2 事务 guard 尚未实现，当前不把它当作受控事务初始化入口。
         """
         self._ready()
+        self._file_manager._require_write('BufferPool.write_page')
         # 参数先按顺序校验类型/范围，随后才检查保留页和分配状态。
         if type(page_id) is not int or not 0 <= page_id <= MAX_PAGE_ID:
             self._file_manager.validate_page_id(page_id)
@@ -169,6 +183,7 @@ class BufferPool:
 
     def free_page(self, page_id: int) -> None:
         self._ready()
+        self._file_manager._require_write('BufferPool.free_page')
         self._file_manager.validate_page_id(page_id, for_release=True)
         frame = self._frames.pop(page_id, None)
         self._replacement.remove(page_id)

@@ -7,22 +7,29 @@ compiler, row codec, storage engine, catalog and executor.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from enum import Enum
 from typing import Protocol, TypeAlias, runtime_checkable
+from uuid import UUID
 
 
 from minidb.core.disk_types import CATALOG_ROOT_PAGE_ID, MAX_PAGE_ID
 
 
-Row: TypeAlias = tuple[int | str, ...]
+Value: TypeAlias = int | str | bool | date | Decimal | None
+Row: TypeAlias = tuple[Value, ...]
 
 
 def _validate_row(values: object, *, field_name: str) -> None:
     if not isinstance(values, tuple):
         raise TypeError(f"{field_name} must be a tuple")
     for value in values:
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
-            raise TypeError(f"{field_name} values must be int or str")
+        if value is None or type(value) in (int, str, bool, date, Decimal):
+            continue
+        raise TypeError(
+            f"{field_name} values must be int, str, bool, date, Decimal, or None"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +94,66 @@ class WriteKind(Enum):
     INSERT = "INSERT"
     UPDATE = "UPDATE"
     DELETE = "DELETE"
+
+
+_TOKEN_CONSTRUCTION_KEY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedWriteToken:
+    """Validator-issued identity for one prepared write in one session.
+
+    Handoff note: this value object is ready for callers, but the current
+    private issue hook is only a bridge for contract tests. The Session-owned
+    Validator must become the only production caller before StorageEngine
+    batch writes are enabled; do not use ``_issue_validated_write_token`` from
+    Executor or application code.
+    """
+
+    session_id: UUID
+    catalog_generation: int
+    prepared_id: UUID
+
+    def __init__(
+        self,
+        session_id: UUID,
+        catalog_generation: int,
+        prepared_id: UUID,
+        *,
+        _construction_key: object = None,
+    ) -> None:
+        if _construction_key is not _TOKEN_CONSTRUCTION_KEY:
+            raise TypeError(
+                "ValidatedWriteToken can only be issued by the validator factory"
+            )
+        if not isinstance(session_id, UUID):
+            raise TypeError("session_id must be a UUID")
+        if type(catalog_generation) is not int:
+            raise TypeError("catalog_generation must be an int")
+        if catalog_generation < 0:
+            raise ValueError("catalog_generation must be non-negative")
+        if not isinstance(prepared_id, UUID):
+            raise TypeError("prepared_id must be a UUID")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "catalog_generation", catalog_generation)
+        object.__setattr__(self, "prepared_id", prepared_id)
+
+
+def _issue_validated_write_token(
+    session_id: UUID, catalog_generation: int, prepared_id: UUID
+) -> ValidatedWriteToken:
+    """Temporary internal hook for contract tests and the future Validator.
+
+    This function deliberately has no Session registry or one-shot consume
+    tracking yet. The eventual Validator factory must own those checks and
+    replace direct test use before this contract is promoted from WIP.
+    """
+    return ValidatedWriteToken(
+        session_id,
+        catalog_generation,
+        prepared_id,
+        _construction_key=_TOKEN_CONSTRUCTION_KEY,
+    )
 
 
 @dataclass(frozen=True, slots=True)
