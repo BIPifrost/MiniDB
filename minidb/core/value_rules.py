@@ -79,6 +79,9 @@ def default_text(value, target):
         return "TRUE" if value else "FALSE"
     if target.kind is DataType.DATE:
         return value.isoformat()
+    if target.kind is DataType.DECIMAL:
+        # 值已按列的scale归一化；f保留小数位，避免极小数和零被str写成指数。
+        return format(value, "f")
     return str(value)
 
 

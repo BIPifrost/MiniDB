@@ -1,7 +1,7 @@
-"""张振维护的共享样例，对应工作计划第 17.2 节。
+"""张振维护的共享样例，已升级为第二阶段v2类型和目录合同。
 
 本文件提供表、目录行、SQL 以及独立手写的预期 Bound/Plan。
-正式 AST 构造函数在 semantic_cases.py，完整 JSON 预期在 contracts_v1.json。
+正式 AST 构造函数在 semantic_cases.py；contracts_v1.json仅保留旧版trace基准。
 expected_bound/expected_plan 不调用 Semantic 或 Planner，避免被测代码自己生成答案。
 源码位置使用 core/source.py 的正式类型。
 """
@@ -32,15 +32,15 @@ STUDENT_SCHEMA = Schema((
 ))
 
 STUDENT_TABLE = TableDef(
-    ref=TableRef(table_id=1, name="student", root_page_id=2),
+    ref=TableRef(table_id=1, name="student", root_page_id=3),
     schema=STUDENT_SCHEMA,
 )
 
-# 独立手写的七字段预期，不能调用被测转换函数生成标准答案。
+# 独立手写的v2十五字段预期；page2是索引目录，普通列默认可空。
 STUDENT_CATALOG_ROWS = (
-    (1, "student", 2, 3, 0, "id", "INT"),
-    (1, "student", 2, 3, 1, "name", "VARCHAR"),
-    (1, "student", 2, 3, 2, "age", "INT"),
+    (1, "student", 3, 3, 0, "id", "INT", -1, -1, -1, True, False, False, "NONE", ""),
+    (1, "student", 3, 3, 1, "name", "VARCHAR", 1024, -1, -1, True, False, False, "NONE", ""),
+    (1, "student", 3, 3, 2, "age", "INT", -1, -1, -1, True, False, False, "NONE", ""),
 )
 
 
@@ -71,15 +71,15 @@ def _expected_predicate(case_name: str) -> BoundExpr | None:
     sql = CASE_SQL[case_name]
     if case_name == "select":
         return BoundBinary(
-            ExprOp.GE, BoundColumn(2, DataType.INT, span(sql, "age")),
+            ExprOp.GE, BoundColumn(2, DataType.INT, span(sql, "age"), True),
             BoundLiteral(18, DataType.INT, span(sql, "18")), DataType.BOOL,
-            span(sql, ">="), span(sql, "age >= 18"),
+            span(sql, ">="), span(sql, "age >= 18"), True,
         )
     if case_name == "delete":
         return BoundBinary(
-            ExprOp.EQ, BoundColumn(0, DataType.INT, span(sql, "id")),
+            ExprOp.EQ, BoundColumn(0, DataType.INT, span(sql, "id"), True),
             BoundLiteral(1, DataType.INT, span(sql, "1")), DataType.BOOL,
-            span(sql, "="), span(sql, "id = 1"),
+            span(sql, "="), span(sql, "id = 1"), True,
         )
     return None
 

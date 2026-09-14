@@ -8,7 +8,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import call, patch
 
-from fixtures.contracts import CASE_SQL, STUDENT_TABLE, expected_bound, expected_plan, span
+from tests.fixtures.contracts import CASE_SQL, STUDENT_TABLE, expected_bound, expected_plan, span
 from minidb.compiler._checks import Check, _positions_in_order
 from minidb.compiler.bound import BoundBinary, BoundColumn, BoundLiteral, BoundSelect, BoundUnary
 from minidb.compiler.bound_validation import validate_bound
@@ -53,10 +53,11 @@ class PositionRulesTests(unittest.TestCase):
         """观察校验调用：共享节点复用内部结果时，两条父子关系仍分别检查。"""
         statement_span, condition_span, shared_span, scan_span = (object() for _ in range(4))
         shared = BoundBinary(
-            ExprOp.GE, BoundColumn(2, DataType.INT, shared_span),
+            ExprOp.GE, BoundColumn(2, DataType.INT, shared_span, nullable=True),
             BoundLiteral(18, DataType.INT, shared_span), DataType.BOOL, shared_span, shared_span,
+            nullable=True,
         )
-        predicate = BoundBinary(ExprOp.AND, shared, shared, DataType.BOOL, condition_span, condition_span)
+        predicate = BoundBinary(ExprOp.AND, shared, shared, DataType.BOOL, condition_span, condition_span, nullable=True)
         columns = (ResultColumn("name", DataType.VARCHAR),)
         bound = BoundSelect(STUDENT_TABLE, (1,), columns, predicate, statement_span)
         with patch.object(Check, "span") as check_span:
@@ -129,8 +130,8 @@ class SourceValidationTests(unittest.TestCase):
         shared = self.bound.predicate
         # 手工构造结构损坏的 Bound；不会将它视为 Parser 的合法输出。
         narrow = span(self.sql, "18")
-        second = BoundUnary(ExprOp.NOT, shared, DataType.BOOL, narrow, narrow)
-        root = BoundBinary(ExprOp.AND, shared, second, DataType.BOOL, shared.op_span, shared.span)
+        second = BoundUnary(ExprOp.NOT, shared, DataType.BOOL, narrow, narrow, nullable=True)
+        root = BoundBinary(ExprOp.AND, shared, second, DataType.BOOL, shared.op_span, shared.span, nullable=True)
         self.assert_plan_error(lambda: validate_bound(replace(self.bound, predicate=root), plan=True))
 
 

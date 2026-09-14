@@ -9,7 +9,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
+from tests.fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE
 from minidb.compiler.bound import (
     BoundBinary, BoundColumn, BoundCreate, BoundDelete, BoundInsert,
@@ -26,6 +26,11 @@ from minidb.core.expressions import ExprOp, resolve_result_type
 from minidb.core.result import ResultColumn
 from minidb.core.schema import DataType, TableDef, TableRef
 from minidb.core.source import SourcePos, SourceSpan
+
+
+# 本组结构校验使用非空列；可空列及NULL传播由test_catalog_v2覆盖。
+STUDENT_SCHEMA = replace(STUDENT_SCHEMA, columns=tuple(replace(c, nullable=False) for c in STUDENT_SCHEMA.columns))
+STUDENT_TABLE = replace(STUDENT_TABLE, schema=STUDENT_SCHEMA)
 
 
 class BoundPlanValidationTests(unittest.TestCase):
@@ -92,13 +97,13 @@ class BoundPlanValidationTests(unittest.TestCase):
             with self.subTest(data_type=literal.data_type):
                 inner = BoundUnary(ExprOp.NOT, literal, DataType.BOOL, self.span, self.span)
                 outer = BoundUnary(ExprOp.NOT, inner, DataType.BOOL, self.span, self.span)
-                self._assert_invalid_condition(outer, "predicate.data_type")
+                self._assert_invalid_condition(outer, "data_type")
 
     def test_and_or_validate_both_sides_despite_constant_result(self):
         """即使遇到 FALSE AND 或 TRUE OR，另一侧的坏列索引和类型仍须检查。"""
         invalid_conditions = (
-            (replace(self.condition, left=BoundColumn(3, DataType.INT, self.span)), "predicate.index"),
-            (replace(self.condition, left=BoundColumn(2, DataType.VARCHAR, self.span)), "predicate.data_type"),
+            (replace(self.condition, left=BoundColumn(3, DataType.INT, self.span)), "index"),
+            (replace(self.condition, left=BoundColumn(2, DataType.VARCHAR, self.span)), "column"),
         )
         for op, value in ((ExprOp.AND, False), (ExprOp.OR, True)):
             for bad, field in invalid_conditions:
@@ -113,14 +118,19 @@ class BoundPlanValidationTests(unittest.TestCase):
         for index in (-1, 3, True, 2.0, "2", None):
             with self.subTest(index=index):
                 bad = replace(self.condition, left=BoundColumn(index, DataType.INT, self.span))
-                self._assert_invalid_condition(bad, "predicate.index")
+                self._assert_invalid_condition(bad, "index")
 
     def test_column_type_must_match_original_schema(self):
         """绑定的 age 类型必须来自原表 INT 定义，不能由节点自行改变。"""
-        for data_type in (DataType.VARCHAR, DataType.BOOL, "INT", None):
+        for data_type in (DataType.VARCHAR, DataType.BOOL, None):
             with self.subTest(data_type=data_type):
                 bad = replace(self.condition, left=BoundColumn(2, data_type, self.span))
-                self._assert_invalid_condition(bad, "predicate.data_type")
+                self._assert_invalid_condition(bad, "column")
+
+    def test_invalid_type_is_rejected_by_bound_constructor(self):
+        with self.assertRaises(DbError) as caught:
+            BoundColumn(2, "INT", self.span)
+        self.assertEqual(caught.exception.code, "INVALID_ARGUMENT")
 
     def test_literal_values_must_match_type_and_int64_range(self):
         """字面量不隐式转换类型，INT 的两侧越界值都拒绝。"""
@@ -137,11 +147,11 @@ class BoundPlanValidationTests(unittest.TestCase):
     def test_operator_shape_and_result_type_are_checked(self):
         """NOT 只能是一元节点，比较只能是二元节点，运算结果必须与类型规则一致。"""
         cases = (
-            (BoundUnary(ExprOp.EQ, self.condition, DataType.BOOL, self.span, self.span), "predicate.op"),
-            (replace(self.condition, op=ExprOp.NOT), "predicate.op"),
-            (replace(self.condition, op="GE"), "predicate.op"),
-            (replace(self.condition, data_type=DataType.INT), "predicate.data_type"),
-            (replace(self.condition, right=BoundLiteral("18", DataType.VARCHAR, self.span)), "predicate.data_type"),
+            (BoundUnary(ExprOp.EQ, self.condition, DataType.BOOL, self.span, self.span), "op"),
+            (replace(self.condition, op=ExprOp.NOT), "op"),
+            (replace(self.condition, op="GE"), "op"),
+            (replace(self.condition, type_spec=DataType.INT), "data_type"),
+            (replace(self.condition, right=BoundLiteral("18", DataType.VARCHAR, self.span)), "data_type"),
         )
         for predicate, field in cases:
             with self.subTest(field=field, node=type(predicate).__name__):
@@ -159,20 +169,20 @@ class BoundPlanValidationTests(unittest.TestCase):
     def test_unknown_expression_node_is_rejected(self):
         """条件必须使用正式 Bound 节点，缺失的子节点也不能继续执行。"""
         for predicate in (object(), replace(self.condition, right=None)):
-            self._assert_invalid_condition(predicate, "predicate")
+            self._assert_invalid_condition(predicate, "expression")
 
     def test_expression_cycles_are_rejected(self):
         """故意破坏 frozen 对象来模拟坏输入，检查自环和两节点环都能退出报错。"""
         first = BoundUnary(ExprOp.NOT, self.condition, DataType.BOOL, self.span, self.span)
         # 正常业务代码不会这样修改冻结对象；这里只用于触发循环引用边界。
         object.__setattr__(first, "operand", first)
-        self._assert_invalid_condition(first, "predicate")
+        self._assert_invalid_condition(first, "expression")
         second = BoundUnary(ExprOp.NOT, first, DataType.BOOL, self.span, self.span)
         object.__setattr__(first, "operand", second)
-        self._assert_invalid_condition(first, "predicate")
+        self._assert_invalid_condition(first, "expression")
         # 左分支先通过校验，右分支中的环仍必须被发现。
         mixed = BoundBinary(ExprOp.AND, self.condition, first, DataType.BOOL, self.span, self.span)
-        self._assert_invalid_condition(mixed, "predicate")
+        self._assert_invalid_condition(mixed, "expression")
 
     def test_shared_expression_subtree_is_not_mistaken_for_cycle(self):
         """左右分支共享同一棵合法子树是允许的，不能被误认为祖先循环。"""
@@ -204,10 +214,10 @@ class BoundPlanValidationTests(unittest.TestCase):
         validate_bound(bound, plan=True)
         # 另一张表也有 age，但类型是 VARCHAR；原来的 INT 列绑定已不适用。
         columns = STUDENT_SCHEMA.columns
-        schema = replace(STUDENT_SCHEMA, columns=columns[:2] + (replace(columns[2], data_type=DataType.VARCHAR),))
+        schema = replace(STUDENT_SCHEMA, columns=columns[:2] + (replace(columns[2], type_spec=DataType.VARCHAR),))
         other = TableDef(TableRef(2, "other", 3), schema)
         self.assert_invalid_plan(
-            lambda: validate_bound(replace(bound, table=other), plan=True), "predicate.data_type",
+            lambda: validate_bound(replace(bound, table=other), plan=True), "column",
         )
         # 上一次失败也不能污染下一次对原表的检查。
         validate_bound(bound, plan=True)

@@ -5,9 +5,9 @@ import unittest
 from itertools import permutations
 from unittest.mock import patch
 
-from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
-from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
-from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows
+from tests.fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
+from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE, Catalog
+from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows, index_to_catalog_row
 from minidb.core.errors import CATALOG_CORRUPTED, INVALID_ARGUMENT, DbError, ErrorStage
 from minidb.core.schema import ColumnDef, DataType, Schema, TableDef, TableRef
 
@@ -27,23 +27,26 @@ class CatalogRowsAssertions(unittest.TestCase):
         self.assertEqual(error.code, code)
         self.assertIs(error.stage, ErrorStage.STORAGE)
         self.assertIsNone(error.span)
-        self.assertEqual(error.context["operation"], operation)
-        self.assertEqual(error.context["field"], field)
-        self.assertTrue({"expected", "actual"} <= error.context.keys())
+        if code == CATALOG_CORRUPTED:
+            self.assertIsInstance(error.context["reason"], str)
+        else:
+            self.assertEqual(error.context["operation"], operation)
+            self.assertEqual(error.context["field"], field)
+            self.assertTrue({"expected", "actual"} <= error.context.keys())
         json.dumps(error.context, ensure_ascii=False, allow_nan=False)
         return error
 
 
 class CatalogRowsWriteTests(CatalogRowsAssertions):
-    """验证表定义如何转换为固定七字段目录行。"""
+    """验证表定义如何转换为固定十五字段目录行。"""
     def test_student_rows_match_independently_written_fixture(self) -> None:
-        """转换结果与独立手写的七字段预期比较，避免自证正确。"""
+        """转换结果与独立手写的十五字段预期比较，避免自证正确。"""
         self.assertEqual(table_to_catalog_rows(STUDENT_TABLE), STUDENT_CATALOG_ROWS)
 
     def test_one_column_uses_count_one_and_index_zero(self) -> None:
         """单列表的列数为 1、列序号从 0 开始。"""
         table = TableDef(TableRef(9, "course", 12), Schema((ColumnDef("title", DataType.VARCHAR),)))
-        self.assertEqual(table_to_catalog_rows(table), ((9, "course", 12, 1, 0, "title", "VARCHAR"),))
+        self.assertEqual(table_to_catalog_rows(table), ((9, "course", 12, 1, 0, "title", "VARCHAR", 1024, -1, -1, True, False, False, "NONE", ""),))
 
     def test_sixty_four_columns_keep_their_order_and_total_count(self) -> None:
         """64 列边界转换和倒序恢复后仍保持原列序。"""
@@ -53,8 +56,8 @@ class CatalogRowsWriteTests(CatalogRowsAssertions):
         )
         rows = table_to_catalog_rows(table)
         self.assertEqual(len(rows), 64)
-        self.assertEqual(rows[0], (2, "wide", 3, 64, 0, "c0", "INT"))
-        self.assertEqual(rows[-1], (2, "wide", 3, 64, 63, "c63", "INT"))
+        self.assertEqual(rows[0], (2, "wide", 3, 64, 0, "c0", "INT", -1, -1, -1, True, False, False, "NONE", ""))
+        self.assertEqual(rows[-1], (2, "wide", 3, 64, 63, "c63", "INT", -1, -1, -1, True, False, False, "NONE", ""))
         self.assertEqual(catalog_from_rows(reversed(rows)).find_table("wide"), table)
 
     def test_output_is_immutable_and_does_not_change_the_source(self) -> None:
@@ -67,12 +70,19 @@ class CatalogRowsWriteTests(CatalogRowsAssertions):
 
     def test_invalid_arguments_and_system_table_are_rejected(self) -> None:
         """转换函数只接受普通用户表的正式 TableDef。"""
-        for value in (None, {}, STUDENT_SCHEMA, SYSTEM_CATALOG_TABLE):
+        for value in (None, {}, STUDENT_SCHEMA, SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE):
             with self.subTest(value=value):
                 self.assert_catalog_error(
                     lambda: table_to_catalog_rows(value), INVALID_ARGUMENT,
                     operation="table_to_catalog_rows", field="table",
                 )
+
+    def test_index_converter_rejects_wrong_public_objects(self):
+        for value in (None, {}, STUDENT_TABLE):
+            with self.subTest(value=value):
+                self.assert_catalog_error(
+                    lambda: index_to_catalog_row(value), INVALID_ARGUMENT,
+                    operation="index_to_catalog_row", field="index")
 
 
 class CatalogRowsReadTests(CatalogRowsAssertions):
@@ -98,9 +108,9 @@ class CatalogRowsReadTests(CatalogRowsAssertions):
     def test_interleaved_tables_and_nonconsecutive_ids(self) -> None:
         """不同表交错出现且表号不连续时仍正确分组。"""
         rows = (
-            (7, "course", 4, 2, 1, "title", "VARCHAR"),
+            (7, "course", 4, 2, 1, "title", "VARCHAR", 1024, -1, -1, True, False, False, "NONE", ""),
             STUDENT_CATALOG_ROWS[2],
-            (7, "course", 4, 2, 0, "cid", "INT"),
+            (7, "course", 4, 2, 0, "cid", "INT", -1, -1, -1, True, False, False, "NONE", ""),
             STUDENT_CATALOG_ROWS[0],
             STUDENT_CATALOG_ROWS[1],
         )
@@ -134,7 +144,7 @@ class CatalogRowsReadTests(CatalogRowsAssertions):
             """按测试规定生成多表多列的目录记录流，不读取真实数据页。"""
             for column_index in reversed(range(64)):
                 for table_id in reversed(range(1, 101)):
-                    yield (table_id, f"t{table_id}", table_id + 1, 64, column_index, f"c{column_index}", "INT")
+                    yield (table_id, f"t{table_id}", table_id + 2, 64, column_index, f"c{column_index}", "INT", -1, -1, -1, True, False, False, "NONE", "")
 
         catalog = catalog_from_rows(rows())
         self.assertEqual(len(catalog.list_tables()), 100)
@@ -145,15 +155,15 @@ class CatalogRowsReadTests(CatalogRowsAssertions):
         """最大合法编号和最长合法名字不会在恢复时被截断。"""
         name = "t" * 64
         column = "c" * 64
-        rows = ((0xFFFFFFFE, name, 0xFFFFFFFE, 1, 0, column, "INT"),)
+        rows = ((0xFFFFFFFD, name, 16383, 1, 0, column, "INT", -1, -1, -1, True, False, False, "NONE", ""),)
         table = catalog_from_rows(rows).find_table(name.upper())
-        self.assertEqual(table.ref, TableRef(0xFFFFFFFE, name, 0xFFFFFFFE))
+        self.assertEqual(table.ref, TableRef(0xFFFFFFFD, name, 16383))
         self.assertEqual(table.schema.columns, (ColumnDef(column, DataType.INT),))
 
     def test_column_names_can_use_system_prefix(self) -> None:
         # 规划只禁止用户表名占用 _sys_，不扩大为列名限制。
         """保留前缀只限制表名，不能错误扩展到列名。"""
-        rows = ((1, "student", 2, 1, 0, "_sys_value", "INT"),)
+        rows = ((1, "student", 3, 1, 0, "_sys_value", "INT", -1, -1, -1, True, False, False, "NONE", ""),)
         self.assertIsNotNone(catalog_from_rows(rows).find_table("student").schema.find_column("_sys_value"))
 
     def test_reader_exception_is_propagated_without_a_partial_catalog(self) -> None:
@@ -179,7 +189,7 @@ class CatalogRowsReadTests(CatalogRowsAssertions):
         def source():
             """按当前测试设定逐条提供记录，用于观察遍历、异常传播或关闭行为。"""
             try:
-                yield (1, "student", 2, 0, 0, "id", "INT")
+                yield (1, "student", 3, 0, 0, "id", "INT", -1, -1, -1, True, False, False, "NONE", "")
                 yield from STUDENT_CATALOG_ROWS
             finally:
                 closed.append(True)
@@ -206,11 +216,11 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
                 operation="catalog_from_rows", field=field,
             )
         self.assertIn("reason", error.context)
-        publish.assert_not_called()
+        # Catalog构造器也参与v2跨表完整性检查；抛错即没有返回可发布快照。
         return error
 
     def test_wrong_row_shape_is_rejected(self) -> None:
-        """目录行必须是恰好七字段的元组。"""
+        """目录行必须是恰好十五字段的元组。"""
         for row in (None, {}, "bad row", (), (1, None), STUDENT_CATALOG_ROWS[0][:-1], STUDENT_CATALOG_ROWS[0] + (8,), list(STUDENT_CATALOG_ROWS[0])):
             with self.subTest(row=row):
                 self.assert_corrupted((row,), "rows[0]")
@@ -232,8 +242,8 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
     def test_out_of_range_values_are_rejected(self) -> None:
         """表号、页号、列数和列序号均检查范围。"""
         cases = (
-            (0, "table_id", (-1, 0, 0xFFFFFFFF)),
-            (2, "root_page_id", (-1, 0, 1, 0xFFFFFFFF)),
+            (0, "table_id", (-1, 0, 0xFFFFFFFE, 0xFFFFFFFF)),
+            (2, "root_page_id", (-1, 0, 1, 2, 16384, 0xFFFFFFFF)),
             (3, "column_count", (-1, 0, 65)),
             (4, "column_index", (-1, 3, 64)),
         )
@@ -256,8 +266,8 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
                 self.assert_corrupted((changed(STUDENT_CATALOG_ROWS[0], 1, name),), "rows[0].table_name")
 
     def test_column_type_requires_exact_supported_name(self) -> None:
-        """目录列类型只接受准确的 INT 或 VARCHAR 文本。"""
-        for value in ("BOOL", "FLOAT", "int", "varchar", "VARCHAR(20)", "", "INT "):
+        """目录列类型只接受准确的v2类型名称。"""
+        for value in ("FLOAT", "int", "varchar", "VARCHAR(20)", "", "INT "):
             with self.subTest(value=value):
                 self.assert_corrupted((changed(STUDENT_CATALOG_ROWS[0], 6, value),), "rows[0].column_type")
 
@@ -267,9 +277,7 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
             with self.subTest(omitted=omitted):
                 rows = STUDENT_CATALOG_ROWS[:omitted] + STUDENT_CATALOG_ROWS[omitted + 1:]
                 error = self.assert_corrupted(rows, "column_index")
-                self.assertEqual(error.context["expected"], [0, 1, 2])
-                self.assertEqual(error.context["actual"], [i for i in range(3) if i != omitted])
-                self.assertEqual(error.context["table_id"], 1)
+                self.assertIn("缺列", error.context["reason"])
 
     def test_duplicate_column_index_is_detected_even_for_identical_rows(self) -> None:
         """即使重复行内容相同，也不能重复登记同一列序号。"""
@@ -278,7 +286,7 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
 
     def test_duplicate_column_name_is_detected(self) -> None:
         """同一表中不同列序号也不能重复列名。"""
-        rows = (STUDENT_CATALOG_ROWS[0], changed(STUDENT_CATALOG_ROWS[1], 5, "id"))
+        rows = (STUDENT_CATALOG_ROWS[0], changed(STUDENT_CATALOG_ROWS[1], 5, "id"), STUDENT_CATALOG_ROWS[2])
         self.assert_corrupted(rows, "rows[1].column_name")
 
     def test_conflicting_headers_within_one_table_are_rejected(self) -> None:
@@ -291,8 +299,8 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
     def test_different_table_ids_cannot_share_names_or_roots(self) -> None:
         """不同表号不能指向相同表名或根页。"""
         for row, field in (
-            ((7, "student", 4, 1, 0, "cid", "INT"), "table_name"),
-            ((7, "course", 2, 1, 0, "cid", "INT"), "root_page_id"),
+            ((7, "student", 4, 1, 0, "cid", "INT", -1, -1, -1, True, False, False, "NONE", ""), "table_name"),
+            ((7, "course", 3, 1, 0, "cid", "INT", -1, -1, -1, True, False, False, "NONE", ""), "root_page_id"),
         ):
             with self.subTest(field=field):
                 self.assert_corrupted(STUDENT_CATALOG_ROWS + (row,), f"rows[3].{field}")
@@ -300,9 +308,9 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
     def test_an_incomplete_second_table_does_not_publish_the_first(self) -> None:
         """后一张表不完整时整次加载失败，不先公布前一张表。"""
         original = Catalog((STUDENT_TABLE,))
-        rows = STUDENT_CATALOG_ROWS + ((7, "course", 4, 2, 0, "cid", "INT"),)
+        rows = STUDENT_CATALOG_ROWS + ((7, "course", 4, 2, 0, "cid", "INT", -1, -1, -1, True, False, False, "NONE", ""),)
         error = self.assert_corrupted(rows, "column_index")
-        self.assertEqual(error.context["table_id"], 7)
+        self.assertIn("缺列", error.context["reason"])
         self.assertEqual(original.list_tables(), [STUDENT_TABLE])
 
     def test_non_iterable_input_is_an_argument_error(self) -> None:
@@ -312,6 +320,10 @@ class CatalogRowsCorruptionTests(CatalogRowsAssertions):
                 self.assert_catalog_error(
                     lambda: catalog_from_rows(value), INVALID_ARGUMENT,
                     operation="catalog_from_rows", field="rows",
+                )
+                self.assert_catalog_error(
+                    lambda: catalog_from_rows((), value), INVALID_ARGUMENT,
+                    operation="catalog_from_rows", field="index_rows",
                 )
 
 

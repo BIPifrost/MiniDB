@@ -575,6 +575,29 @@ class AdditionalV2Tests(V2Case):
 
 class RealContractTests(unittest.TestCase):
     """不用v2 AST/错误码替身：验证现有前端子集和实际依赖缺口。"""
+    def test_decimal_defaults_use_fixed_scale_and_reload(self):
+        """目录中的极小数及零仍保存固定小数位，读取后精度和符号一致。"""
+        spec = TypeSpec(DataType.DECIMAL, precision=18, scale=18)
+        for text in ("0.000000000000000001", "-0.000000000000000001", "0.000000000000000000"):
+            with self.subTest(text=text), localcontext() as context:
+                context.prec = 2
+                table = table_of(ColumnDef("amount", spec, default=DefaultSpec(True, Decimal(text))))
+                rows = table_to_catalog_rows(table)
+                self.assertEqual(rows[0][-1], text)
+                restored = catalog_from_rows(rows).find_table("users")
+                self.assertEqual(restored.schema.columns[0].default.value.as_tuple(), Decimal(text).as_tuple())
+
+    def test_catalog_rejects_exponent_decimal_defaults(self):
+        """值虽相等，指数文本也不是第10节规定的目录编码，必须报告损坏。"""
+        spec = TypeSpec(DataType.DECIMAL, precision=18, scale=18)
+        table = table_of(ColumnDef("amount", spec, default=DefaultSpec(True, Decimal(0))))
+        row = table_to_catalog_rows(table)[0]
+        for text in ("1E-18", "-1E-18", "0E-18"):
+            with self.subTest(text=text):
+                with self.assertRaises(DbError) as caught:
+                    catalog_from_rows((row[:-1] + (text,),))
+                self.assertEqual(caught.exception.code, "CATALOG_CORRUPTED")
+
     def test_existing_parser_to_new_semantic_and_planner(self):
         from minidb.compiler.lexer import Lexer
         from minidb.compiler.parser import Parser

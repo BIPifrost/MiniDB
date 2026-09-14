@@ -5,7 +5,7 @@
 
 from minidb.core.expressions import ExprOp
 from minidb.core.schema import DataType
-from fixtures.contracts import CASE_SQL, span
+from tests.fixtures.contracts import CASE_SQL, span
 
 
 def select_case():

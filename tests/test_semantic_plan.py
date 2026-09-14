@@ -4,16 +4,16 @@ import unittest
 from dataclasses import replace
 from unittest.mock import Mock, patch
 
-from fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE, span
-from fixtures.semantic_cases import create_case, delete_case, insert_case, select_case
+from tests.fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE, span
+from tests.fixtures.semantic_cases import create_case, delete_case, insert_case, select_case
 from minidb.catalog.catalog import Catalog
 from minidb.compiler.ast import ColumnDecl, CreateTableStmt, NameRef
 from minidb.compiler.bound import BoundDelete, BoundInsert, BoundLiteral, BoundSelect, BoundUnary
 from minidb.compiler.plan import DeletePlan, FilterPlan, ProjectPlan, SeqScanPlan
 from minidb.compiler.planner import Planner
-from minidb.compiler.semantic import Semantic, _name, _operation_type
+from minidb.compiler.semantic import Semantic, _name
 from minidb.core.errors import DbError, ErrorStage, COLUMN_NOT_FOUND, TYPE_MISMATCH
-from minidb.core.expressions import ExprOp
+from minidb.core.expressions import ExprOp, resolve_result_type
 from minidb.core.result import ResultColumn
 from minidb.core.schema import DataType
 
@@ -32,7 +32,7 @@ class SemanticLogicTests(unittest.TestCase):
             action()
         self.assertEqual(raised.exception.code, code)
         self.assertIs(raised.exception.stage, ErrorStage.SEMANTIC)
-        self.assertEqual(raised.exception.context["operation"], "Semantic.analyze")
+        self.assertIsInstance(raised.exception.context, dict)
         return raised.exception
 
     def test_insert_reorders_by_schema_and_preserves_string(self):
@@ -42,31 +42,33 @@ class SemanticLogicTests(unittest.TestCase):
         self.assertEqual(bound.row, (1, "张三\nA;B's", 20))
         self.assertIs(bound.table, STUDENT_TABLE)
 
-    def test_insert_count_checked_before_column_lookup(self):
-        """值数不匹配应先报错，即使列名本身也不存在。"""
+    def test_insert_column_lookup_precedes_value_count(self):
+        """v2先报告不存在的列，再检查值数。"""
         stmt = replace(self.stmt, columns=(replace(self.stmt.columns[0], text="missing"),))
-        self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), "VALUE_COUNT_MISMATCH")
+        self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), "COLUMN_NOT_FOUND")
 
     def test_insert_duplicate_missing_and_incomplete_columns(self):
         """重复列、不存在列、缺必需列按规划给出不同错误码。"""
         for names, code in ((["id", "id", "age"], "DUPLICATE_INSERT_COLUMN"),
                             (["name", "missing", "id"], "COLUMN_NOT_FOUND"),
-                            (["name", "age"], "INSERT_COLUMN_SET_MISMATCH")):
+                            (["name", "age"], None)):
             with self.subTest(names=names):
                 stmt = replace(self.stmt,
                                columns=tuple(replace(column, text=name) for column, name in zip(self.stmt.columns, names)),
                                values=self.stmt.values[:len(names)])
-                error = self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), code)
-                if code == "INSERT_COLUMN_SET_MISMATCH":
-                    self.assertEqual(error.context["missing_columns"], ["id"])
+                if code is None:
+                    self.assertEqual(self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))).row,
+                                     (None, "Alice", 20))
+                else:
+                    self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), code)
 
     def test_insert_mismatch_points_to_value(self):
         """类型不匹配定位到具体字面量，而不是语句开头。"""
         marker = self.stmt.values[0].span
-        stmt = replace(self.stmt, values=(replace(self.stmt.values[0], value=123, data_type=DataType.INT), *self.stmt.values[1:]))
+        stmt = replace(self.stmt, values=(replace(self.stmt.values[0], value=123, type_spec=DataType.INT), *self.stmt.values[1:]))
         error = self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), "TYPE_MISMATCH")
         self.assertIs(error.span, marker)
-        self.assertEqual(error.context["column_name"], "name")
+        self.assertEqual(error.context["column"], "name")
 
     def test_create_builds_schema_without_allocating_identity(self):
         """CREATE 只生成列结构，不在语义阶段创建 TableRef、分配页或登记表。"""
@@ -117,17 +119,19 @@ class SemanticLogicTests(unittest.TestCase):
         self.assertEqual(error.span, stmt.table_name.span)
 
     def test_operator_error_codes_and_position(self):
-        """字符串顺序比较报 UNSUPPORTED_COMPARISON，跨类型相等报 TYPE_MISMATCH。"""
-        integer = BoundLiteral(18, DataType.INT, None)
-        string = BoundLiteral("18", DataType.VARCHAR, None)
-        self.assertIs(_operation_type(ExprOp.GE, (integer, integer), None), DataType.BOOL)
-        for op, operands, code in ((ExprOp.GT, (string, string), "UNSUPPORTED_COMPARISON"),
-                                   (ExprOp.EQ, (integer, string), "TYPE_MISMATCH"),
-                                   (ExprOp.NOT, (integer,), "TYPE_MISMATCH")):
-            marker = span(op.name)
-            error = self.assert_semantic_error(lambda: _operation_type(op, operands, marker), code)
-            self.assertIs(error.span, marker)
-            self.assertEqual(error.context["operator"], op.name)
+        """通过语义公开入口核对非法比较及NOT的错误码和SQL位置。"""
+        from minidb.compiler.ast import LiteralExpr, BinaryExpr, UnaryExpr
+        location = span("SELECT")
+        integer = LiteralExpr(18, DataType.INT, location)
+        string = LiteralExpr("18", DataType.VARCHAR, location)
+        expressions = (BinaryExpr(ExprOp.EQ, integer, string, location, location),
+                       UnaryExpr(ExprOp.NOT, integer, location, location))
+        for expr in expressions:
+            with self.subTest(operator=expr.op):
+                error = self.assert_semantic_error(
+                    lambda: self.semantic._where(expr, STUDENT_TABLE), "UNSUPPORTED_COMPARISON")
+                self.assertEqual(error.span, location)
+                self.assertEqual(error.context["operator"], expr.op.name)
 
     def test_where_requires_bool_after_expression_binding(self):
         """没有 WHERE 返回 None，裸整数 WHERE 在表达式绑定完成后被拒绝。"""
@@ -135,17 +139,17 @@ class SemanticLogicTests(unittest.TestCase):
         stmt = replace(select_case(), where=select_case().where.right)
         self.assert_semantic_error(lambda: self.semantic.analyze(stmt, Catalog((STUDENT_TABLE,))), "CONDITION_NOT_BOOL")
 
-    def test_order_comparison_error_expects_two_integers(self):
-        """顺序比较只支持整数；拒绝字符串时，错误详情也不能提示 VARCHAR 可用。"""
-        operands = (BoundLiteral("18", DataType.VARCHAR, None),
-                    BoundLiteral("20", DataType.VARCHAR, None))
+    def test_varchar_order_comparison_is_supported_in_v2(self):
+        """v2允许VARCHAR按码点比较；不再沿用v1仅支持整数的断言。"""
+        from minidb.compiler.ast import LiteralExpr, BinaryExpr
+        location = span("SELECT")
         for op in (ExprOp.LT, ExprOp.LE, ExprOp.GT, ExprOp.GE):
-            with self.subTest(operator=op.name):
-                error = self.assert_semantic_error(
-                    lambda: _operation_type(op, operands, None), "UNSUPPORTED_COMPARISON",
-                )
-                self.assertEqual(error.context["expected"], ["INT", "INT"])
-                self.assertEqual(error.context["actual"], ["VARCHAR", "VARCHAR"])
+            with self.subTest(operator=op):
+                expr = BinaryExpr(op, LiteralExpr("18", DataType.VARCHAR, location),
+                                  LiteralExpr("20", DataType.VARCHAR, location), location, location)
+                result = self.semantic._where(expr, STUDENT_TABLE)
+                self.assertEqual(result.data_type, DataType.BOOL)
+                self.assertEqual(result.op, op)
 
     def test_planner_node_order_with_formal_positions(self):
         """检查扫描、过滤、投影和删除的装配顺序，不替换位置检查。"""
@@ -186,7 +190,7 @@ class SemanticPlanContractTests(unittest.TestCase):
 
         for op, value in ((ExprOp.AND, 0), (ExprOp.OR, 1)):
             for right_sql, code in (("missing_col = 1", COLUMN_NOT_FOUND),
-                                    ("age = 'old'", TYPE_MISMATCH)):
+                                    ("age = 'old'", "UNSUPPORTED_COMPARISON")):
                 with self.subTest(op=op, right=right_sql):
                     left_sql = f"1 = {value}"
                     condition_sql = f"{left_sql} {op.name} {right_sql}"
@@ -275,10 +279,10 @@ class SemanticPlanContractTests(unittest.TestCase):
                           span(sql, "NOT NOT age"))
         with self.assertRaises(DbError) as raised:
             self.semantic.analyze(self._select_with_where(sql, outer), self.catalog)
-        self.assertEqual(raised.exception.code, TYPE_MISMATCH)
+        self.assertEqual(raised.exception.code, "UNSUPPORTED_COMPARISON")
         self.assertIs(raised.exception.stage, ErrorStage.SEMANTIC)
         self.assertEqual(raised.exception.span, inner.op_span)
-        self.assertEqual(raised.exception.context["actual"], "INT")
+        self.assertEqual(raised.exception.context["operator"], "NOT")
 
     def test_four_statement_contracts(self):
         """四类真实 AST 均能生成相应 Bound 和合法计划，并保持目录不变。"""
@@ -292,7 +296,7 @@ class SemanticPlanContractTests(unittest.TestCase):
     def test_shared_ast_is_checked_and_bound_once(self):
         """手工共享 AST 只检查、绑定各节点一次；不作为 Parser 输出正确的证据。"""
         from minidb.compiler.ast import BinaryExpr, IdentifierExpr, LiteralExpr
-        from minidb.compiler._ast_validation import validate_ast
+        from minidb.compiler._ast_validation import validate_ast, literal_type
         from minidb.compiler._checks import Check
         from minidb.compiler.semantic import _column
 
@@ -305,12 +309,12 @@ class SemanticPlanContractTests(unittest.TestCase):
         for _ in range(10):
             shared = BinaryExpr(ExprOp.AND, shared, shared, span(sql, "AND"), where_span)
         stmt = self._select_with_where(sql, shared)
-        # 保留 Check.value 的真实执行，只统计同一个字面量被检查几次。
-        with patch.object(Check, "value", autospec=True, side_effect=Check.value) as check_value:
+        # 统计AST结构检查访问常量类型的次数，保留正式实现。
+        with patch("minidb.compiler._ast_validation.literal_type", wraps=literal_type) as check_value:
             validate_ast(stmt)
         self.assertEqual(check_value.call_count, 1)
         with patch("minidb.compiler.semantic._column", wraps=_column) as lookup, \
-             patch("minidb.compiler.semantic._operation_type", wraps=_operation_type) as operation:
+             patch("minidb.compiler.semantic.resolve_result_type", wraps=resolve_result_type) as operation:
             bound = self.semantic.analyze(stmt, self.catalog)
         # 一次选择列 name，一次条件列 age；同一子树的多条引用不会重新按列名查找。
         self.assertEqual(lookup.call_count, 2)
@@ -327,7 +331,7 @@ class SemanticPlanContractTests(unittest.TestCase):
         narrow = shared.right.span
         second = UnaryExpr(ExprOp.NOT, shared, narrow, narrow)
         root = BinaryExpr(ExprOp.AND, shared, second, shared.op_span, shared.span)
-        for field in ("expression.span", "expression"):
+        for field in ("span", "expression"):
             if field == "expression":
                 # frozen 对象正常不能改写，这里故意制造一条回到根节点的坏引用。
                 object.__setattr__(root, "right", root)

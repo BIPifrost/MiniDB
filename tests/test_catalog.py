@@ -2,9 +2,9 @@
 
 import json
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
-from fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
+from tests.fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
 from minidb.core.catalog_protocol import CatalogRead
 from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
@@ -39,7 +39,7 @@ class TableDefinitionTests(ValidationAssertions):
     """检查表身份、编号边界、固定系统 Schema 和不可变性。"""
     def test_shared_student_fixture_matches_contract(self) -> None:
         """student 固定样例的表号、根页号及三列结构符合计划。"""
-        self.assertEqual(STUDENT_TABLE.ref, TableRef(1, "student", 2))
+        self.assertEqual(STUDENT_TABLE.ref, TableRef(1, "student", 3))
         self.assertIs(STUDENT_TABLE.schema, STUDENT_SCHEMA)
         self.assertEqual(
             [(c.name, c.data_type) for c in STUDENT_TABLE.schema.columns],
@@ -49,8 +49,8 @@ class TableDefinitionTests(ValidationAssertions):
 
     def test_user_table_id_and_root_boundaries(self) -> None:
         """用户表号和根页号的上下边界均可构造。"""
-        for table_id in (1, 0xFFFFFFFE):
-            for root_page_id in (2, 0xFFFFFFFE):
+        for table_id in (1, 0xFFFFFFFD):
+            for root_page_id in (3, 16383):
                 with self.subTest(table_id=table_id, root_page_id=root_page_id):
                     ref = TableRef(table_id, "t", root_page_id)
                     table = TableDef(ref, STUDENT_SCHEMA)
@@ -66,8 +66,8 @@ class TableDefinitionTests(ValidationAssertions):
         with self.assertRaises(FrozenInstanceError):
             STUDENT_TABLE.schema = Schema((ColumnDef("x", DataType.INT),))
 
-    def test_system_table_has_fixed_identity_and_seven_columns(self) -> None:
-        """系统目录固定在表号 0、根页 1，并使用约定的七列。"""
+    def test_system_table_has_fixed_identity_and_fifteen_columns(self) -> None:
+        """系统目录固定在表号 0、根页 1，并使用v2约定的十五列。"""
         self.assertEqual(SYSTEM_CATALOG_TABLE.ref, TableRef(0, "_sys_catalog", 1))
         self.assertIs(SYSTEM_CATALOG_TABLE.schema, SYSTEM_CATALOG_SCHEMA)
         self.assertEqual(
@@ -76,13 +76,16 @@ class TableDefinitionTests(ValidationAssertions):
                 ("table_id", "INT"), ("table_name", "VARCHAR"),
                 ("root_page_id", "INT"), ("column_count", "INT"),
                 ("column_index", "INT"), ("column_name", "VARCHAR"),
-                ("column_type", "VARCHAR"),
+                ("type_name", "VARCHAR"), ("type_length", "INT"),
+                ("type_precision", "INT"), ("type_scale", "INT"),
+                ("nullable", "BOOL"), ("primary_key", "BOOL"), ("unique", "BOOL"),
+                ("default_kind", "VARCHAR"), ("default_text", "VARCHAR"),
             ],
         )
 
     def test_equivalent_system_schema_is_accepted_by_value(self) -> None:
         """内容相同的系统 Schema 可以使用，不强求同一个 Python 对象。"""
-        copy = Schema(tuple(ColumnDef(c.name, c.data_type) for c in SYSTEM_CATALOG_SCHEMA.columns))
+        copy = Schema(tuple(replace(c) for c in SYSTEM_CATALOG_SCHEMA.columns))
         table = TableDef(SYSTEM_CATALOG_TABLE.ref, copy)
         self.assertEqual(table, SYSTEM_CATALOG_TABLE)
 
@@ -91,17 +94,17 @@ class TableDefinitionTests(ValidationAssertions):
         for table_id in (True, False, "1", 1.0, None, -1, 0xFFFFFFFF):
             with self.subTest(table_id=table_id):
                 self.assert_rejected(
-                    lambda: TableRef(table_id, "student", 2),
-                    operation="TableRef", field="table_id",
+                    lambda: TableRef(table_id, "student", 3),
+                    operation="TableRef", field="id" if type(table_id) is not int else "identity",
                 )
 
     def test_invalid_root_ids_are_rejected(self) -> None:
         """非法编号和用户表不可占用的保留页号会被拒绝。"""
-        for page_id in (True, False, "2", 2.0, None, -1, 0, 1, 0xFFFFFFFF):
+        for page_id in (True, False, "2", 2.0, None, -1, 0, 1, 2, 16384, 0xFFFFFFFF):
             with self.subTest(page_id=page_id):
                 self.assert_rejected(
                     lambda: TableRef(1, "student", page_id),
-                    operation="TableRef", field="root_page_id",
+                    operation="TableRef", field="id" if type(page_id) is not int else "identity",
                 )
 
     def test_names_must_be_normalized_and_valid(self) -> None:
@@ -109,18 +112,18 @@ class TableDefinitionTests(ValidationAssertions):
         for name in (None, 1, "Student", "", " student", "student ", "学生", "a.b", "1a", "a" * 65):
             with self.subTest(name=name):
                 self.assert_rejected(
-                    lambda: TableRef(1, name, 2),
+                    lambda: TableRef(1, name, 3),
                     operation="TableRef", field="name",
                 )
-        self.assertEqual(TableRef(1, "a" * 64, 2).name, "a" * 64)
+        self.assertEqual(TableRef(1, "a" * 64, 3).name, "a" * 64)
 
     def test_reserved_identity_cannot_be_used_by_user_tables(self) -> None:
         """用户表不能占系统名字、表号或根页。"""
         cases = (
-            (0, "student", 1, "name"),
-            (0, "_sys_catalog", 2, "root_page_id"),
-            (1, "_sys_catalog", 2, "name"),
-            (1, "_sys_other", 2, "name"),
+            (0, "student", 1, "reserved"),
+            (0, "_sys_catalog", 2, "reserved"),
+            (1, "_sys_catalog", 3, "identity"),
+            (1, "_sys_other", 3, "identity"),
         )
         for table_id, name, root_page_id, field in cases:
             with self.subTest(table_id=table_id, name=name, root_page_id=root_page_id):
@@ -135,7 +138,7 @@ class TableDefinitionTests(ValidationAssertions):
             with self.subTest(field=field):
                 self.assert_rejected(
                     lambda: TableDef(ref, schema),
-                    operation="TableDef", field=field,
+                    operation="TableDef", field="fields",
                 )
 
     def test_system_schema_cannot_be_replaced_reordered_or_retyped(self) -> None:
@@ -159,7 +162,7 @@ class CatalogTests(ValidationAssertions):
     """检查内存目录的查表、排序、快照隔离以及重复信息拒绝行为。"""
     def setUp(self) -> None:
         """每个测试开始前建立独立样例，避免前一个测试的状态影响后一个。"""
-        self.course = TableDef(TableRef(7, "course", 3), Schema((ColumnDef("cid", DataType.INT),)))
+        self.course = TableDef(TableRef(7, "course", 4), Schema((ColumnDef("cid", DataType.INT),)))
         self.catalog = Catalog((self.course, STUDENT_TABLE))
 
     def test_empty_catalog(self) -> None:
@@ -224,7 +227,7 @@ class CatalogTests(ValidationAssertions):
 
     def test_constructor_rejects_mutable_inputs_and_invalid_elements(self) -> None:
         """目录构造器拒绝可变列表和非 TableDef 元素。"""
-        for tables, field in (([], "tables"), (None, "tables"), ((None,), "tables[0]"), (({},), "tables[0]")):
+        for tables, field in (([], "collections"), (None, "collections"), ((None,), "table"), (({},), "table")):
             with self.subTest(tables=tables):
                 self.assert_rejected(
                     lambda: Catalog(tables),
@@ -235,22 +238,22 @@ class CatalogTests(ValidationAssertions):
         """系统目录不能作为普通用户表登记进内存目录。"""
         self.assert_rejected(
             lambda: Catalog((SYSTEM_CATALOG_TABLE,)),
-            operation="Catalog", field="tables[0]",
+            operation="Catalog", field="table",
         )
 
     def test_constructor_rejects_duplicate_names_ids_and_roots(self) -> None:
         """不同用户表不能重复使用名字、表号或根页。"""
         cases = (
-            (TableRef(2, "student", 3), "name"),
-            (TableRef(1, "course", 3), "table_id"),
-            (TableRef(2, "course", 2), "root_page_id"),
+            (TableRef(2, "student", 4), "name"),
+            (TableRef(1, "course", 4), "table_id"),
+            (TableRef(2, "course", 3), "root_page_id"),
         )
         for ref, field in cases:
             with self.subTest(field=field):
                 other = TableDef(ref, STUDENT_SCHEMA)
                 self.assert_rejected(
                     lambda: Catalog((STUDENT_TABLE, other)),
-                    operation="Catalog", field=f"tables[1].ref.{field}",
+                    operation="Catalog", field="table",
                 )
                 self.assertEqual(self.catalog.list_tables(), [STUDENT_TABLE, self.course])
 

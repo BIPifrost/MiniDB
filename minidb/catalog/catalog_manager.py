@@ -1,19 +1,21 @@
 """v2目录的加载、预检和事务内发布；不实现页、事务、令牌消费或索引算法。
 
-尚未提供的装配接口：
+目录依赖的装配接口：
     StorageEngine.catalog_services: CatalogServices
 由Session装配下列服务，其中 write_catalog_rows(table, rows) -> None 是拟定的
 目录写入适配接口：必须使用Session签发的目录写令牌并调用正式StorageEngine，
 不得省略token、开启第二个事务或在适配层复制约束规则。
 format_version() -> int 必须返回实际已验证文件版本；不是让调用方随意填常量。
 validate_index_root(index, table) -> None 由IndexManager校验锚点及页归属。
-目前真实StorageEngine未提供这些接口，因此会明确停止，不尝试写v1文件。
+StorageEngine已提供catalog_services及bind_catalog_services；正式Session仍需绑定
+目录写入和索引根校验回调。未装配时明确停止，不尝试写v1文件。
 """
 from dataclasses import dataclass
 from collections.abc import Callable
 from minidb.catalog.catalog import Catalog, SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE
 from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows, index_to_catalog_row
 from minidb.core._v2_contract import fail, require_method
+from minidb.core.errors import DbError
 from minidb.core.schema import MAX_USER_TABLE_ID, TableDef, IndexDef
 from minidb.core.transaction import TransactionGuard, TransactionState
 
@@ -153,10 +155,37 @@ class CatalogManager:
     def _read_snapshot(self):
         for table in (SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE):
             self._storage.validate_table_root(table)
-        # 目录最多128*64列；读入时也设上限，避免损坏页链耗尽内存。
-        rows = _read_rows(self._storage, SYSTEM_CATALOG_TABLE, 128 * 64)
-        indexes = _read_rows(self._storage, SYSTEM_INDEXES_TABLE, 16381)
-        candidate = catalog_from_rows(rows, indexes)
+        # 边读边校验，坏记录先于close错误被发现；只记当前行的位置。
+        positions = {}
+        readers = (_read_rows(self._storage, SYSTEM_CATALOG_TABLE, 128 * 64, positions),
+                   _read_rows(self._storage, SYSTEM_INDEXES_TABLE, 16381, positions))
+        error = None
+        try:
+            candidate = catalog_from_rows(*readers)
+        except BaseException as caught:
+            error = caught
+            if isinstance(error, DbError) and "row_index" in error.context:
+                row_id = positions.get(error.context.get("table_name"))
+                if row_id is not None:
+                    error._update_context(row_id={"page_id": row_id.page_id,
+                                                  "slot_id": row_id.slot_id,
+                                                  "generation": row_id.generation})
+            raise
+        finally:
+            # 纯目录转换不拥有输入流；管理器必须关闭两个自己创建的读取器。
+            cleanup_error = None
+            for reader in readers:
+                try:
+                    reader.close()
+                except Exception as cleanup:
+                    if error is not None:
+                        _add_cleanup(error, cleanup)
+                    elif cleanup_error is not None:
+                        _add_cleanup(cleanup_error, cleanup)
+                    else:
+                        cleanup_error = cleanup
+            if cleanup_error is not None:
+                raise cleanup_error
         for table in candidate.tables:
             self._storage.validate_table_root(table)
         by_id = {table.ref.table_id: table for table in candidate.tables}
@@ -183,19 +212,23 @@ def _services(storage):
     return services
 
 
-def _read_rows(storage, table, limit):
+def _read_rows(storage, table, limit, positions):
     scan = storage.scan_rows(table)
     error = None
-    rows = []
     try:
-        for record in scan:
-            if len(rows) >= limit:
+        for number, record in enumerate(scan):
+            if number >= limit:
                 fail("CATALOG_CORRUPTED", "目录记录超过文件/表资源上限", stage="STORAGE",
                      table_name=table.ref.name, limit=limit)
-            rows.append(record.values)
-        return tuple(rows)
+            positions[table.ref.name] = getattr(record, "row_id", None)
+            yield record.values
+    except GeneratorExit:
+        # 管理器因目录内容错误主动关闭时，将close异常交回它附加到首错。
+        raise
     except BaseException as caught:
         error = caught
+        if isinstance(error, DbError) and "table_name" not in error.context:
+            error._update_context(table_name=table.ref.name)
         raise
     finally:
         try:
@@ -203,4 +236,16 @@ def _read_rows(storage, table, limit):
         except Exception as cleanup:
             if error is None:
                 raise
-            error.add_note(f"目录扫描close失败：{cleanup}")
+            _add_cleanup(error, cleanup)
+
+
+def _add_cleanup(error, cleanup):
+    """保留首错身份，DbError附加可序列化详情，其余异常用note记录。"""
+    if isinstance(error, DbError):
+        detail = ({"stage": cleanup.stage.name, "code": cleanup.code,
+                   "message": cleanup.message, "context": dict(cleanup.context)}
+                  if isinstance(cleanup, DbError) else
+                  {"type": type(cleanup).__name__, "message": str(cleanup)})
+        error._update_context(cleanup_errors=[*error.context.get("cleanup_errors", ()), detail])
+    else:
+        error.add_note(f"目录扫描close失败：{cleanup}")

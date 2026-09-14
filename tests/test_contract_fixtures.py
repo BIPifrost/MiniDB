@@ -10,8 +10,8 @@ from dataclasses import fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 
-from fixtures import contracts
-from fixtures.semantic_cases import AST_CASES
+from tests.fixtures import contracts
+from tests.fixtures.semantic_cases import AST_CASES
 from minidb.catalog.catalog import Catalog
 from minidb.compiler.bound_validation import validate_bound
 from minidb.compiler.lexer import Lexer
@@ -39,7 +39,7 @@ class ContractFixtureTests(unittest.TestCase):
 
     def setUp(self):
         """用 UTF-8 读取独立编写的固定预期。"""
-        path = Path(__file__).parent / "fixtures" / "contracts_v1.json"
+        path = Path(__file__).parent / "fixtures" / "contracts_v2.json"
         self.fixture = json.loads(path.read_text(encoding="utf-8"))
         self.cases = self.fixture["cases"]
 
@@ -66,7 +66,7 @@ class ContractFixtureTests(unittest.TestCase):
     def test_fixture_contains_all_five_cases_and_three_stages(self):
         """五个交接样例分别保存自己的 SQL、AST、Bound 和 Plan。"""
         names = {"create", "insert", "select", "delete", "select_duplicate"}
-        self.assertEqual(self.fixture["format_version"], 1)
+        self.assertEqual(self.fixture["format_version"], 2)
         self.assertEqual(set(self.cases), names)
         self.assertEqual(set(contracts.CASE_SQL), names)
         self.assertEqual(set(AST_CASES), names)
@@ -102,14 +102,15 @@ class ContractFixtureTests(unittest.TestCase):
                             elif kind == "IdentifierExpr":
                                 self.assertEqual(fragment, node["name"])
                             elif kind == "ColumnDecl":
-                                self.assertEqual(fragment, f"{node['name']['text']} {node['data_type']}")
-                                type_span = node["type_span"]
+                                self.assertEqual(fragment, f"{node['name']['text']} {node['type_decl']['kind']}")
+                                type_span = node["type_decl"]["span"]
                                 self.assertEqual(sql[type_span["start"]["offset"]:type_span["end"]["offset"]],
-                                                 node["data_type"])
+                                                 node["type_decl"]["kind"])
                             elif kind == "BoundColumn":
                                 self.assertEqual(fragment, contracts.STUDENT_SCHEMA.columns[node["index"]].name)
                             elif kind in ("LiteralExpr", "BoundLiteral"):
-                                text = f"'{node['value']}'" if node["data_type"] == "VARCHAR" else str(node["value"])
+                                value_type = node["type_spec"]["kind"]
+                                text = f"'{node['value']}'" if value_type == "VARCHAR" else str(node["value"])
                                 self.assertEqual(fragment, text)
                             elif kind in ("BinaryExpr", "BoundBinary"):
                                 op_span = node["op_span"]

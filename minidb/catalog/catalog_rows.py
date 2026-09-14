@@ -6,13 +6,18 @@ from minidb.core.errors import DbError
 from minidb.core._v2_contract import fail
 from minidb.core.schema import (
     TableDef, TableRef, Schema, ColumnDef, TypeSpec, DataType, IndexDef, IndexOrigin,
-    SYSTEM_CATALOG_SCHEMA, SYSTEM_INDEXES_SCHEMA, MAX_USER_TABLES,
+    SYSTEM_CATALOG_SCHEMA, SYSTEM_INDEXES_SCHEMA, MAX_USER_TABLES, MAX_USER_TABLE_ID,
 )
 from minidb.core.value_rules import default_text, normalize_value, parse_default
 
 
 def table_to_catalog_rows(table):
     """每列一条15字段记录；不使用RowCodec，不触碰磁盘。"""
+    # 系统表定义固定在代码中，不能被当作用户元数据写入目录。
+    if not isinstance(table, TableDef) or not 1 <= table.ref.table_id <= MAX_USER_TABLE_ID:
+        fail("INVALID_ARGUMENT", "目录转换需要用户TableDef", stage="STORAGE",
+             operation="table_to_catalog_rows", field="table",
+             expected="用户TableDef", actual=repr(table))
     result = []
     for position, column in enumerate(table.schema.columns):
         spec, default = column.type_spec, column.default
@@ -28,6 +33,10 @@ def table_to_catalog_rows(table):
 
 
 def index_to_catalog_row(index):
+    if not isinstance(index, IndexDef):
+        fail("INVALID_ARGUMENT", "索引目录转换需要IndexDef", stage="STORAGE",
+             operation="index_to_catalog_row", field="index",
+             expected="IndexDef", actual=repr(index))
     return (index.index_id, index.name, index.table_id, index.column_index,
             index.root_page_id, index.unique, index.origin.name)
 
@@ -43,21 +52,36 @@ def _validate_row(row, schema):
 
 def catalog_from_rows(rows, index_rows=()):
     """接受目录行流。禁止把v1七字段目录猜成v2；索引缺失也属于损坏。"""
+    # 参数不能迭代和迭代过程的存储故障是两类错误；后者仍保留原异常。
+    sources = []
+    for field, source in (("rows", rows), ("index_rows", index_rows)):
+        try:
+            sources.append(iter(source))
+        except TypeError:
+            fail("INVALID_ARGUMENT", "目录输入必须可迭代", stage="STORAGE",
+                 operation="catalog_from_rows", field=field,
+                 expected="目录行迭代器", actual=type(source).__name__)
+    rows, index_rows = sources
     grouped = defaultdict(dict)
     metadata, indexes = {}, []
     input_error = None
+    location = {}
 
     def values(source):
         """区分输入读取失败和目录内容损坏，保留存储层的原异常。"""
         nonlocal input_error
         try:
-            yield from source
+            # 不用yield from：目录校验提前失败时，包装生成器的close不能
+            # 继续关闭调用方拥有的输入流；正式RowScan由CatalogManager关闭。
+            for row in source:
+                yield row
         except Exception as error:
             input_error = error
             raise
 
     try:
-        for row in values(rows):
+        for row_index, row in enumerate(values(rows)):
+            location = {"table_name": "_sys_catalog", "row_index": row_index}
             _validate_row(row, SYSTEM_CATALOG_SCHEMA)
             tid, name, root, count, position = row[:5]
             # 读取过程中立即限制目录规模，不能等整份输入进入内存再检查。
@@ -79,17 +103,21 @@ def catalog_from_rows(rows, index_rows=()):
             default = parse_default(row[13], row[14], spec, nullable=row[10])
             column = ColumnDef(row[5], spec, row[10], default, row[11], row[12])
             metadata[tid], grouped[tid][position] = header, column
+        # 全表完整性错误不归咎于最后读取的一条合法记录。
+        location = {}
         tables = []
         for tid, (name, root, count) in metadata.items():
             if len(grouped[tid]) != count:
                 raise ValueError("系统目录缺列")
             tables.append(TableDef(TableRef(tid, name, root),
                                    Schema(tuple(grouped[tid][i] for i in range(count)))))
-        for row in values(index_rows):
+        for row_index, row in enumerate(values(index_rows)):
+            location = {"table_name": "_sys_indexes", "row_index": row_index}
             if len(indexes) >= 16381:
                 raise ValueError("索引目录超过v2文件的可用页数")
             _validate_row(row, SYSTEM_INDEXES_SCHEMA)
             indexes.append(IndexDef(*row[:6], IndexOrigin[row[6]]))
+        location = {}
         catalog = Catalog(tuple(tables), tuple(indexes))
         catalog.validate_integrity()
         return catalog
@@ -99,4 +127,5 @@ def catalog_from_rows(rows, index_rows=()):
             raise
         if isinstance(error, DbError) and error.code == "CATALOG_CORRUPTED":
             raise
-        fail("CATALOG_CORRUPTED", "系统目录内容不符合v2规范", stage="STORAGE", reason=str(error))
+        fail("CATALOG_CORRUPTED", "系统目录内容不符合v2规范", stage="STORAGE",
+             reason=str(error), **location)
