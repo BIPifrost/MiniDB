@@ -85,9 +85,11 @@ class ParserErrorTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
         return caught.exception
 
-    def test_decimal_is_unsupported_after_lexing(self):
-        error = self.assert_syntax_error("SELECT 3.14 FROM t;", UNSUPPORTED_FEATURE)
-        self.assertEqual(error.context["feature"], "3.14")
+    def test_decimal_is_parsed_exactly_after_lexing(self):
+        from decimal import Decimal
+
+        statement = parse("INSERT INTO t(amount) VALUES (3.14);")[0]
+        self.assertEqual(statement.values[0].value, Decimal("3.14"))
 
     def test_arithmetic_is_unsupported(self):
         error = self.assert_syntax_error("SELECT id FROM t WHERE id + 1;", UNSUPPORTED_FEATURE)
@@ -129,11 +131,11 @@ class ParserErrorTests(unittest.TestCase):
         self.assertEqual(result.errors[1].stage, ErrorStage.LEXICAL)
         self.assertTrue(result.stopped_on_lexical_error)
 
-    def test_extended_keyword_is_unsupported_in_expect_position(self):
-        # 验证 parser.py 的统一错误分类：扩展关键字不应被误报为普通语法错误。
+    def test_deferred_keyword_is_unsupported_in_expect_position(self):
+        # JOIN 等延期关键字不应被误报为普通语法错误。
         for sql in (
-            "CREATE UPDATE t(id INT);",
-            "CREATE TABLE t(id UPDATE);",
+            "CREATE JOIN t(id INT);",
+            "CREATE TABLE t(id JOIN);",
         ):
             error = self.assert_syntax_error(sql, UNSUPPORTED_FEATURE)
             self.assertIn("feature", error.context)

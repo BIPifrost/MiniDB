@@ -3,7 +3,9 @@
 由赵凯航维护，张振复核。定义 TokenKind 枚举、Token 不可变数据类、
 关键字映射表，以及教学材料用的粗类别映射函数。
 
-TokenKind 名称与工作计划第 15.3 节完全一致，不得新增、删除或改名。
+TokenKind 名称与工作计划中的 SQL 文法保持一致。v2 在原有基础上增加
+UPDATE、约束、索引、类型和诊断入口所需的关键字；后续模块通过这些精确
+TokenKind 区分语法，不再把它们当作普通标识符。
 粗类别仅用于 trace 输出和 README 展示，内部 Token 始终使用精确 TokenKind，
 不增加另一套可变类别字段（工作计划第 15.13 节）。
 """
@@ -15,7 +17,11 @@ from minidb.core.source import SourceSpan
 
 
 class TokenKind(Enum):
-    """SQL 词法单元类型。名称固定，见工作计划第 15.3 节。"""
+    """SQL 词法单元类型。
+
+    ``INTEGER_LITERAL`` 对应工作计划文法中的 ``UINT``：词法阶段只保存
+    无符号数字文本，负号由单独的 ``MINUS`` Token 表示并交给 Parser 处理。
+    """
 
     # ---- 关键字：本期支持 ----
     KW_CREATE = "KW_CREATE"
@@ -32,22 +38,39 @@ class TokenKind(Enum):
     KW_NOT = "KW_NOT"
     KW_INT = "KW_INT"
     KW_VARCHAR = "KW_VARCHAR"
+    KW_BOOL = "KW_BOOL"
+    KW_DATE = "KW_DATE"
+    KW_DECIMAL = "KW_DECIMAL"
 
-    # ---- 关键字：扩展（Lexer 识别，Parser 报 UNSUPPORTED_FEATURE）----
+    # ---- D1/D2 语法关键字 ----
+    # 这些关键字由 Lexer 识别，Parser/AST 在后续阶段使用。
     KW_UPDATE = "KW_UPDATE"
+    KW_SET = "KW_SET"
+    KW_PRIMARY = "KW_PRIMARY"
+    KW_KEY = "KW_KEY"
+    KW_UNIQUE = "KW_UNIQUE"
+    KW_NULL = "KW_NULL"
+    KW_DEFAULT = "KW_DEFAULT"
+    KW_INDEX = "KW_INDEX"
+    KW_ON = "KW_ON"
+    KW_DESCRIBE = "KW_DESCRIBE"
+    KW_IS = "KW_IS"
+
+    # ---- 关键字：扩展/预留 ----
+    # Lexer 同样识别这些词；尚未接入的语法由 Parser 按统一策略报告
+    # UNSUPPORTED_FEATURE，而不是把关键字误当成 IDENT。
     KW_JOIN = "KW_JOIN"
     KW_ORDER = "KW_ORDER"
     KW_BY = "KW_BY"
     KW_GROUP = "KW_GROUP"
     KW_DISTINCT = "KW_DISTINCT"
-    KW_NULL = "KW_NULL"
     KW_TRUE = "KW_TRUE"
     KW_FALSE = "KW_FALSE"
     KW_EXPLAIN = "KW_EXPLAIN"
 
     # ---- 标识符与字面量 ----
     IDENT = "IDENT"
-    INTEGER_LITERAL = "INTEGER_LITERAL"
+    INTEGER_LITERAL = "INTEGER_LITERAL"  # 文法中的 UINT（无符号整数）
     DECIMAL_LITERAL = "DECIMAL_LITERAL"
     STRING_LITERAL = "STRING_LITERAL"
 
@@ -124,13 +147,25 @@ KEYWORDS: dict[str, TokenKind] = {
     "not": TokenKind.KW_NOT,
     "int": TokenKind.KW_INT,
     "varchar": TokenKind.KW_VARCHAR,
+    "bool": TokenKind.KW_BOOL,
+    "date": TokenKind.KW_DATE,
+    "decimal": TokenKind.KW_DECIMAL,
     "update": TokenKind.KW_UPDATE,
+    "set": TokenKind.KW_SET,
+    "primary": TokenKind.KW_PRIMARY,
+    "key": TokenKind.KW_KEY,
+    "unique": TokenKind.KW_UNIQUE,
+    "null": TokenKind.KW_NULL,
+    "default": TokenKind.KW_DEFAULT,
+    "index": TokenKind.KW_INDEX,
+    "on": TokenKind.KW_ON,
+    "describe": TokenKind.KW_DESCRIBE,
+    "is": TokenKind.KW_IS,
     "join": TokenKind.KW_JOIN,
     "order": TokenKind.KW_ORDER,
     "by": TokenKind.KW_BY,
     "group": TokenKind.KW_GROUP,
     "distinct": TokenKind.KW_DISTINCT,
-    "null": TokenKind.KW_NULL,
     "true": TokenKind.KW_TRUE,
     "false": TokenKind.KW_FALSE,
     "explain": TokenKind.KW_EXPLAIN,

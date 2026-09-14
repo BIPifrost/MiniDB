@@ -134,14 +134,14 @@ class TestSourceText(unittest.TestCase):
 class TestTokenKind(unittest.TestCase):
     """验证 TokenKind 枚举的工作计划要求（第 15.3 节）。"""
 
-    def test_total_count_is_43(self):
-        """TokenKind 总数为 43（工作计划 15.3 节固定列表）。"""
-        self.assertEqual(len(list(TokenKind)), 43)
+    def test_total_count_is_55(self):
+        """TokenKind 总数为 55（v2 文法所需关键字已加入）。"""
+        self.assertEqual(len(list(TokenKind)), 55)
 
-    def test_keyword_count_is_24(self):
-        """关键字 KW_* 共 24 个。"""
+    def test_keyword_count_is_36(self):
+        """关键字 KW_* 共 36 个。"""
         kw = [k for k in TokenKind if k.name.startswith("KW_")]
-        self.assertEqual(len(kw), 24)
+        self.assertEqual(len(kw), 36)
 
     def test_supported_keywords_exist(self):
         """本期支持的 14 个关键字都存在。"""
@@ -313,9 +313,9 @@ class TestToken(unittest.TestCase):
 class TestKeywordsMapping(unittest.TestCase):
     """验证 KEYWORDS 映射表的工作计划要求（第 15.3 节）。"""
 
-    def test_total_count_is_24(self):
-        """KEYWORDS 映射表共 24 条（全部关键字，含扩展关键字）。"""
-        self.assertEqual(len(KEYWORDS), 24)
+    def test_total_count_is_36(self):
+        """KEYWORDS 映射表共 36 条（全部 v2 及延期关键字）。"""
+        self.assertEqual(len(KEYWORDS), 36)
 
     def test_all_keyword_kinds_are_mapped(self):
         """每个 KW_* 枚举值都能在 KEYWORDS 中找到。"""

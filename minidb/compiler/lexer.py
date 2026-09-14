@@ -11,14 +11,15 @@
 - 多个 generator 交错消费时互不干扰，符合工作计划第 15.3 节
   "每份新的 SourceText 使用新的扫描器和解析器状态"的要求。
 
-规则依据：
-- 第 2.2 节：标识符 [A-Za-z_][A-Za-z0-9_]*，最多 64 字符；关键字大小写不敏感；
-  字符串单引号包围，双单引号转义；-- 行注释和 /* */ 块注释（不嵌套）
-- 第 15.3 节：位置规则（行/列从 1 开始，offset 从 0 开始按 Unicode 字符计数，
-  CRLF 算一次换行但 offset 占 2 字符）；数字词法 [0-9]+ 或 [0-9]+\\.[0-9]+；
-  非法数字片段整体报 INVALID_NUMBER；EOF 只产生一次
-- 第 1.3 节第 7 条：3.14 在 Lexer 中识别为 DECIMAL_LITERAL，Parser 再拒绝
-- 第 15.12 节：错误码 INVALID_CHARACTER / UNTERMINATED_STRING /
+v2 规则依据：
+- 标识符为 [A-Za-z_][A-Za-z0-9_]*，最多 64 字符；关键字大小写不敏感。
+- ``tokens.KEYWORDS`` 是关键字的唯一来源，包含 UPDATE、约束、新类型、
+  CREATE INDEX、DESCRIBE 和 EXPLAIN 所需单词。
+- 字符串单引号包围，双单引号转义；-- 行注释和 /* */ 块注释不嵌套。
+- 数字只接受 [0-9]+ 或 [0-9]+\\.[0-9]+；负号始终产生独立 MINUS，
+  Decimal 的精确数值由 Parser 根据 Token 原文构造，Lexer 不使用 float。
+- 位置按 Unicode 字符计数；CRLF 算一次换行但 offset 占 2 个字符。
+- 错误码 INVALID_CHARACTER / UNTERMINATED_STRING /
   UNTERMINATED_COMMENT / INVALID_NUMBER / IDENTIFIER_TOO_LONG
 """
 
@@ -254,8 +255,8 @@ class _Scanner:
 
         # 关键字判断：转小写后查映射表（工作计划第 2.2 节）
         lower = lexeme.lower()
-        if lower in KEYWORDS:
-            kind = KEYWORDS[lower]
+        kind = KEYWORDS.get(lower)
+        if kind is not None:
             return self._make_token(kind, lexeme, None, start_line, start_col, start_offset)
 
         # 普通标识符：value 为原始名字（工作计划第 6.1 节）

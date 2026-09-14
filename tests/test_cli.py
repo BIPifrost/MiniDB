@@ -64,6 +64,32 @@ class CliTests(unittest.TestCase):
             main(["--syntax-check", "--trace"])
         self.assertEqual(raised.exception.code, 2)
 
+    def test_readable_trace_groups_compilation_stages(self):
+        # 测试 main.py 的可读 trace：阶段标签应按编译流程出现，且不输出 JSON 事件。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sql = root / "trace.sql"
+            db = root / "trace.db"
+            sql.write_text(
+                "CREATE TABLE t(id INT); SELECT * FROM t;",
+                encoding="utf-8",
+                newline="",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--db", str(db), "--file", str(sql), "--trace-readable"])
+            self.assertEqual(code, 0)
+            output = stderr.getvalue()
+            self.assertIn("语句 1 · Token 流", output)
+            self.assertIn("语句 1 · AST 语法树", output)
+            self.assertIn("语句 1 · 语义检查结果", output)
+            self.assertIn("语句 1 · 执行计划", output)
+            self.assertIn("语句 1 · 优化后计划", output)
+            self.assertIn("KW_CREATE", output)
+            self.assertNotIn('{"data"', output)
+            self.assertIn("Query OK, 0 rows affected", stdout.getvalue())
+
     def test_interactive_mode_executes_statements_and_accepts_quit(self):
         # 测试 main.py 的交互循环：分号提交、结果显示和 quit 退出。
         with tempfile.TemporaryDirectory() as directory:

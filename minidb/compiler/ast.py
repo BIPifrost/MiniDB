@@ -1,31 +1,45 @@
-"""MiniDB 的抽象语法树（AST）公共定义。
+"""MiniDB 的不可变抽象语法树（AST）公共定义。
 
-AST 是 Parser 交给 Semantic 的中间结果：它只记录 SQL 写了什么以及每段
-内容在源码中的位置，不查询目录、不检查列类型，也不执行任何数据库操作。
-
-字段和构造顺序遵循工作计划第 6.3、15.4 节。所有节点都是不可变数据对象，
-这样 Parser 交给 Semantic 后，后续模块不会意外改写同一棵语法树。结构检查
-由 ``compiler._ast_validation.validate_ast`` 统一完成；这里不重复实现语义规则。
+AST 只记录 SQL 的语法结构和源码位置。表、列是否存在，类型能否赋值，
+以及约束是否冲突，均由 Semantic 在下一阶段判断。字段遵循 v2 工作计划
+第 7.1 节；所有节点使用 frozen、slots，避免后续阶段意外改写语法树。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 from minidb.core.expressions import ExprOp
-from minidb.core.schema import DataType
+from minidb.core.schema import DataType, TypeSpec
 from minidb.core.source import SourceSpan
 
 
 @dataclass(frozen=True, slots=True)
 class NameRef:
-    """SQL 中写出的名字及其源码范围。
-
-    ``text`` 保留用户原始大小写；是否为合法标识符、是否需要归一化，
-    由 Semantic 在知道语句上下文后处理。
-    """
+    """SQL 中写出的名字及其源码范围；保留用户输入的原始大小写。"""
 
     text: str
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
+class TypeDecl:
+    """CREATE TABLE 中尚未经过语义归一化的类型声明。"""
+
+    kind: DataType
+    length: int | None
+    precision: int | None
+    scale: int | None
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintDecl:
+    """列级约束；只有 DEFAULT 的 ``value`` 不为 None。"""
+
+    kind: str
+    value: LiteralExpr | None
     span: SourceSpan
 
 
@@ -34,9 +48,32 @@ class ColumnDecl:
     """CREATE TABLE 中的一列声明。"""
 
     name: NameRef
-    data_type: DataType
-    type_span: SourceSpan
+    type_decl: TypeDecl
+    constraints: tuple[ConstraintDecl, ...]
     span: SourceSpan
+
+    def __post_init__(self) -> None:
+        # v1 调用顺序为 (name, DataType, type_span, span)。暂时接收这一
+        # 形式，让已完成的旧 CRUD 测试和队友分支不会因 AST 升级立即失效。
+        if isinstance(self.type_decl, DataType) and isinstance(self.constraints, SourceSpan):
+            object.__setattr__(
+                self,
+                "type_decl",
+                TypeDecl(self.type_decl, None, None, None, self.constraints),
+            )
+            object.__setattr__(self, "constraints", ())
+
+    @property
+    def data_type(self) -> DataType:
+        """v1 读取方的只读兼容属性；类型真值只保存在 type_decl。"""
+
+        return self.type_decl.kind
+
+    @property
+    def type_span(self) -> SourceSpan:
+        """v1 读取方的只读兼容属性。"""
+
+        return self.type_decl.span
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,19 +86,27 @@ class IdentifierExpr:
 
 @dataclass(frozen=True, slots=True)
 class LiteralExpr:
-    """表达式中的整数或字符串常量。
+    """常量；NULL 使用 ``value=None, type_spec=None`` 表示未定类型。"""
 
-    BOOL 常量不从用户 SQL AST 进入；它只允许作为后续优化产生的绑定值。
-    """
-
-    value: int | str
-    data_type: DataType
+    value: object
+    type_spec: TypeSpec | None
     span: SourceSpan
+
+    def __post_init__(self) -> None:
+        # 兼容 v1 手工 AST 使用 DataType 的写法，但不保留第二份类型来源。
+        if isinstance(self.type_spec, DataType):
+            object.__setattr__(self, "type_spec", TypeSpec(self.type_spec))
+
+    @property
+    def data_type(self) -> DataType | None:
+        """v1 读取方的只读兼容属性。"""
+
+        return None if self.type_spec is None else self.type_spec.kind
 
 
 @dataclass(frozen=True, slots=True)
 class UnaryExpr:
-    """一元表达式；当前只支持 ``NOT``。"""
+    """一元逻辑表达式；当前只允许 NOT。"""
 
     op: ExprOp
     operand: Expr
@@ -71,7 +116,7 @@ class UnaryExpr:
 
 @dataclass(frozen=True, slots=True)
 class BinaryExpr:
-    """二元比较或逻辑表达式。"""
+    """二元比较或 AND/OR 逻辑表达式。"""
 
     op: ExprOp
     left: Expr
@@ -80,14 +125,30 @@ class BinaryExpr:
     span: SourceSpan
 
 
-# 表达式类型并集。括号不会生成节点，只由 Parser 根据优先级组织这些节点。
-Expr = IdentifierExpr | LiteralExpr | UnaryExpr | BinaryExpr
+@dataclass(frozen=True, slots=True)
+class IsNullExpr:
+    """``expr IS NULL`` 或 ``expr IS NOT NULL``。"""
+
+    operand: Expr
+    negated: bool
+    op_span: SourceSpan
+    span: SourceSpan
+
+
+Expr: TypeAlias = IdentifierExpr | LiteralExpr | UnaryExpr | BinaryExpr | IsNullExpr
+
+
+@dataclass(frozen=True, slots=True)
+class Assignment:
+    """UPDATE SET 中的一项赋值；右侧只允许列引用或常量。"""
+
+    target: NameRef
+    value: IdentifierExpr | LiteralExpr
+    span: SourceSpan
 
 
 @dataclass(frozen=True, slots=True)
 class CreateTableStmt:
-    """CREATE TABLE 语句。"""
-
     table_name: NameRef
     columns: tuple[ColumnDecl, ...]
     span: SourceSpan
@@ -95,8 +156,6 @@ class CreateTableStmt:
 
 @dataclass(frozen=True, slots=True)
 class InsertStmt:
-    """INSERT INTO ... VALUES ... 语句。"""
-
     table_name: NameRef
     columns: tuple[NameRef, ...]
     values: tuple[LiteralExpr, ...]
@@ -105,7 +164,7 @@ class InsertStmt:
 
 @dataclass(frozen=True, slots=True)
 class SelectStmt:
-    """SELECT 语句；星号由 ``select_all`` 表示，不生成特殊列名。"""
+    """星号由 ``select_all=True`` 表示，此时 columns 必须为空。"""
 
     table_name: NameRef
     select_all: bool
@@ -116,28 +175,71 @@ class SelectStmt:
 
 @dataclass(frozen=True, slots=True)
 class DeleteStmt:
-    """DELETE 语句。"""
-
     table_name: NameRef
     where: Expr | None
     span: SourceSpan
 
 
-# 语句类型并集，供 Parser、Semantic 和 Session 使用同一个公共定义。
-Statement = CreateTableStmt | InsertStmt | SelectStmt | DeleteStmt
+@dataclass(frozen=True, slots=True)
+class UpdateStmt:
+    table: NameRef
+    assignments: tuple[Assignment, ...]
+    predicate: Expr | None
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
+class CreateIndexStmt:
+    name: NameRef
+    table: NameRef
+    column: NameRef
+    unique: bool
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
+class DescribeStmt:
+    table: NameRef
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True)
+class ExplainStmt:
+    statement: InsertStmt | SelectStmt | DeleteStmt | UpdateStmt
+    span: SourceSpan
+
+
+Statement: TypeAlias = (
+    CreateTableStmt
+    | InsertStmt
+    | SelectStmt
+    | DeleteStmt
+    | UpdateStmt
+    | CreateIndexStmt
+    | DescribeStmt
+    | ExplainStmt
+)
 
 
 __all__ = [
     "NameRef",
+    "TypeDecl",
+    "ConstraintDecl",
     "ColumnDecl",
     "IdentifierExpr",
     "LiteralExpr",
     "UnaryExpr",
     "BinaryExpr",
+    "IsNullExpr",
     "Expr",
+    "Assignment",
     "CreateTableStmt",
     "InsertStmt",
     "SelectStmt",
     "DeleteStmt",
+    "UpdateStmt",
+    "CreateIndexStmt",
+    "DescribeStmt",
+    "ExplainStmt",
     "Statement",
 ]

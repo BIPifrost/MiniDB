@@ -7,8 +7,8 @@ import logging
 import sys
 from collections.abc import Sequence
 
+from minidb.cli.display import format_result, format_trace_readable
 from minidb.cli.session import Session
-from minidb.cli.display import format_result
 from minidb.core.diagnostics import format_trace
 from minidb.core.errors import (
     DbError,
@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--file", help="执行 SQL 文件；不指定时从标准输入读取")
     parser.add_argument("--syntax-check", action="store_true", help="只检查 SQL 语法，不打开数据库")
     parser.add_argument("--trace", action="store_true", help="输出编译阶段 JSON trace")
+    parser.add_argument("--trace-readable", action="store_true", help="输出适合人阅读的分阶段 trace")
     parser.add_argument("--storage-log", action="store_true", help="输出存储事件日志")
     parser.add_argument("--buffer-pages", type=int, default=16, help="缓存页数，默认 16")
     parser.add_argument("--policy", choices=("lru", "fifo"), default="lru", help="缓存替换策略")
@@ -41,13 +42,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             invalid.append("--syntax-check 必须同时指定 --file")
         if args.db != "data/demo.db":
             invalid.append("--syntax-check 不能与 --db 同时使用")
-        if args.trace or args.storage_log or args.optimize:
-            invalid.append("--syntax-check 不能与 --trace、--storage-log 或 --optimize 同时使用")
+        if args.trace or args.trace_readable or args.storage_log or args.optimize:
+            invalid.append("--syntax-check 不能与 --trace、--trace-readable、--storage-log 或 --optimize 同时使用")
         if args.buffer_pages != 16 or args.policy != "lru":
             invalid.append("--syntax-check 不能指定缓存参数")
         if invalid:
             parser.error("；".join(invalid))
         return _run_syntax_check(args.file)
+
+    if args.trace and args.trace_readable:
+        parser.error("--trace 与 --trace-readable 不能同时使用")
 
     if args.buffer_pages < 1:
         parser.error("--buffer-pages 必须 >= 1")
@@ -62,7 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             policy=args.policy,
             optimize=args.optimize,
         )
-        sink = _trace_sink(args.trace)
+        trace_mode = "readable" if args.trace_readable else ("json" if args.trace else None)
+        sink = _trace_sink(trace_mode)
         if args.file:
             # Session.execute_file 保留文件原始换行；trace 时由 execute_text 的同一链路输出。
             if sink is None:
@@ -71,11 +76,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 text = _read_sql_file(args.file)
                 results = session.execute_text(text, source_name=args.file, trace_sink=sink)
         else:
-            return _run_interactive(session, trace_sink=sink)
+            return _run_interactive(session, trace_sink=sink, readable_trace=args.trace_readable)
         for result in results:
             _print_result(result, trace=args.trace)
     except DbError as error:
-        if not args.trace:
+        if not (args.trace or args.trace_readable):
             print(str(error), file=sys.stderr)
         exit_code = 1
         if session is not None and not session.is_closed:
@@ -90,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return exit_code
 
 
-def _run_interactive(session: Session, *, trace_sink=None) -> int:
+def _run_interactive(session: Session, *, trace_sink=None, readable_trace: bool = False) -> int:
     """运行按提交执行的交互循环。
 
     一次提交可以跨多行；只有字符串和块注释之外的分号才结束当前提交。
@@ -123,7 +128,7 @@ def _run_interactive(session: Session, *, trace_sink=None) -> int:
         try:
             results = session.execute_text(text, source_name="<stdin>", trace_sink=trace_sink)
             for result in results:
-                _print_result(result, trace=trace_sink is not None)
+                _print_result(result, trace=trace_sink is not None and not readable_trace)
         except DbError as error:
             print(str(error), file=sys.stderr)
             # 语法、语义和执行阶段的普通错误允许下一次提交；存储错误
@@ -226,12 +231,13 @@ def _read_sql_file(path: str) -> str:
         ) from error
 
 
-def _trace_sink(enabled: bool):
-    if not enabled:
+def _trace_sink(mode: str | None):
+    if mode is None:
         return None
 
     def write(event: dict[str, object]) -> None:
-        print(format_trace(event), file=sys.stderr)
+        output = format_trace_readable(event) if mode == "readable" else format_trace(event)
+        print(output, file=sys.stderr)
 
     return write
 

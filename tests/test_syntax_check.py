@@ -59,7 +59,7 @@ class SyntaxCheckTests(unittest.TestCase):
 
     def test_unsupported_feature_is_recorded_and_recovery_continues(self):
         # 扩展关键字属于语法阶段的不支持功能；分号后仍继续检查下一条。
-        result = check("CREATE UPDATE t(id INT); SELECT * FROM t;")
+        result = check("CREATE JOIN t(id INT); SELECT * FROM t;")
         self.assertEqual(result.valid_statement_count, 1)
         self.assertEqual([error.code for error in result.errors], [UNSUPPORTED_FEATURE])
         self.assertFalse(result.stopped_on_lexical_error)
