@@ -1,75 +1,82 @@
-"""张振：不可变的内存用户目录，以及系统目录的唯一固定表定义。"""
-
-from collections.abc import Mapping
+"""表与索引的只读目录；每次变更先构造候选快照，再由管理器发布。"""
 from dataclasses import dataclass, field
 from types import MappingProxyType
-
-from minidb.core.disk_types import CATALOG_ROOT_PAGE_ID
+from minidb.core._v2_contract import fail
 from minidb.core.schema import (
-    SYSTEM_CATALOG_NAME,
-    SYSTEM_CATALOG_SCHEMA,
-    TableDef,
-    TableRef,
-    _invalid,
-    _normalize_identifier,
+    TableDef, TableRef, IndexDef, IndexOrigin, MAX_USER_TABLE_ID, MAX_USER_TABLES,
+    SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_SCHEMA, SYSTEM_INDEXES_NAME,
+    SYSTEM_INDEXES_ID, SYSTEM_INDEXES_SCHEMA, _normalize_identifier, _invalid,
 )
 
-
-# 启动阶段直接引用此对象。它描述目录的结构，不初始化或读取 page 1。
-SYSTEM_CATALOG_TABLE = TableDef(
-    ref=TableRef(table_id=0, name=SYSTEM_CATALOG_NAME, root_page_id=CATALOG_ROOT_PAGE_ID),
-    schema=SYSTEM_CATALOG_SCHEMA,
-)
+SYSTEM_CATALOG_TABLE = TableDef(TableRef(0, SYSTEM_CATALOG_NAME, 1), SYSTEM_CATALOG_SCHEMA)
+SYSTEM_INDEXES_TABLE = TableDef(TableRef(SYSTEM_INDEXES_ID, SYSTEM_INDEXES_NAME, 2), SYSTEM_INDEXES_SCHEMA)
 
 
 @dataclass(frozen=True, slots=True)
 class Catalog:
-    """已知用户表定义的只读快照，满足 CatalogRead 协议。
-
-    通过 Catalog((table1, table2)) 构造；检查表名、表号、根页号唯一。
-    后续 CatalogManager 在持久化成功后发布新快照，不原地修改此对象。
-    """
-
+    """事务内可暂存刚建表但尚未建自动索引的快照；提交前须 validate_integrity。"""
     tables: tuple[TableDef, ...] = ()
-    # 内部查询索引由 __post_init__ 生成，不由构造者传入，也不参与表定义比较。
-    _by_name: Mapping[str, TableDef] = field(init=False, repr=False, compare=False)
+    indexes: tuple[IndexDef, ...] = ()
+    _by_name: object = field(init=False, repr=False, compare=False)
+    _indexes_by_name: object = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        """检查所有表的身份唯一，再建立按表号排序的元组和按表名查询的只读映射。"""
-        if not isinstance(self.tables, tuple):
-            _invalid("Catalog", "tables", "tuple[TableDef, ...]", self.tables)
-
-        by_name: dict[str, TableDef] = {}
-        table_ids: set[int] = set()
-        root_page_ids: set[int] = set()
-        for index, table in enumerate(self.tables):
-            if not isinstance(table, TableDef):
-                _invalid("Catalog", f"tables[{index}]", "TableDef", table)
+    def __post_init__(self):
+        if type(self.tables) is not tuple or type(self.indexes) is not tuple:
+            _invalid("Catalog", "collections", "tuple", (self.tables, self.indexes))
+        if len(self.tables) > MAX_USER_TABLES:
+            fail("RESOURCE_LIMIT", "用户表超过128张", stage="EXECUTION", limit=MAX_USER_TABLES)
+        tables, ids, roots = {}, {}, set()
+        for table in self.tables:
+            if not isinstance(table, TableDef) or not 1 <= table.ref.table_id <= MAX_USER_TABLE_ID:
+                _invalid("Catalog", "table", "用户TableDef", table)
             ref = table.ref
-            if ref.table_id == 0:
-                _invalid("Catalog", f"tables[{index}]", "普通用户表，系统目录使用固定定义", ref.name)
-            if ref.name in by_name:
-                _invalid("Catalog", f"tables[{index}].ref.name", "不重复的表名", ref.name)
-            if ref.table_id in table_ids:
-                _invalid("Catalog", f"tables[{index}].ref.table_id", "不重复的表号", ref.table_id)
-            if ref.root_page_id in root_page_ids:
-                _invalid("Catalog", f"tables[{index}].ref.root_page_id", "不重复的根页号", ref.root_page_id)
-            by_name[ref.name] = table
-            table_ids.add(ref.table_id)
-            root_page_ids.add(ref.root_page_id)
+            if ref.name in tables or ref.table_id in ids or ref.root_page_id in roots:
+                _invalid("Catalog", "table", "表名、表号和根页不重复", ref)
+            tables[ref.name], ids[ref.table_id] = table, table
+            roots.add(ref.root_page_id)
+        names, index_ids = {}, set()
+        for index in self.indexes:
+            if not isinstance(index, IndexDef):
+                _invalid("Catalog", "index", "IndexDef", index)
+            table = ids.get(index.table_id)
+            if (table is None or index.column_index >= len(table.schema.columns)
+                    or index.name in names or index.index_id in index_ids or index.root_page_id in roots):
+                _invalid("Catalog", "index", "引用有效且身份、锚点唯一", index)
+            column = table.schema.columns[index.column_index]
+            if index.origin is IndexOrigin.PRIMARY_KEY and not column.primary_key:
+                _invalid("Catalog", "origin", "主键列的自动索引", index)
+            if index.origin is IndexOrigin.UNIQUE_CONSTRAINT and (not column.unique or column.primary_key):
+                _invalid("Catalog", "origin", "非主键唯一列的自动索引", index)
+            names[index.name] = index
+            index_ids.add(index.index_id)
+            roots.add(index.root_page_id)
+        object.__setattr__(self, "tables", tuple(sorted(self.tables, key=lambda t: t.ref.table_id)))
+        object.__setattr__(self, "indexes", tuple(sorted(self.indexes, key=lambda i: i.index_id)))
+        object.__setattr__(self, "_by_name", MappingProxyType(tables))
+        object.__setattr__(self, "_indexes_by_name", MappingProxyType(names))
 
-        # 三个集合/映射分别防止表名、表号、根页号冲突，不能只按表名去重。
-        ordered = tuple(sorted(self.tables, key=lambda table: table.ref.table_id))
-        # frozen 对象只能在构造阶段用这种方式设置内部字段。
-        # MappingProxyType 给字典套上只读视图，调用者不能修改名字索引。
-        object.__setattr__(self, "tables", ordered)
-        object.__setattr__(self, "_by_name", MappingProxyType(by_name))
+    def find_table(self, name):
+        return self._by_name.get(_normalize_identifier(name, "Catalog.find_table"))
 
-    def find_table(self, name: str) -> TableDef | None:
-        """按归一化名称查字典，找到返回原 TableDef，找不到返回 None。"""
-        normalized = _normalize_identifier(name, "Catalog.find_table")
-        return self._by_name.get(normalized)
-
-    def list_tables(self) -> list[TableDef]:
-        """从不可变元组复制出一个列表，调用者修改列表不会影响目录。"""
+    def list_tables(self):
         return list(self.tables)
+
+    def find_index(self, name):
+        return self._indexes_by_name.get(_normalize_identifier(name, "Catalog.find_index"))
+
+    def indexes_for_table(self, table_id):
+        if type(table_id) is not int or not 1 <= table_id <= MAX_USER_TABLE_ID:
+            _invalid("Catalog.indexes_for_table", "table_id", "用户表号", table_id)
+        return tuple(index for index in self.indexes if index.table_id == table_id)
+
+    def validate_integrity(self):
+        """启动、重载和提交前，检查每个约束恰好有一个正式自动索引。"""
+        for table in self.tables:
+            indexes = self.indexes_for_table(table.ref.table_id)
+            for position, column in enumerate(table.schema.columns):
+                if column.unique:
+                    origin = IndexOrigin.PRIMARY_KEY if column.primary_key else IndexOrigin.UNIQUE_CONSTRAINT
+                    matches = [i for i in indexes if i.column_index == position and i.origin is origin]
+                    if len(matches) != 1:
+                        fail("CATALOG_CORRUPTED", "约束缺少唯一的自动索引", stage="STORAGE",
+                             table_id=table.ref.table_id, column_index=position)

@@ -13,6 +13,7 @@ from minidb.compiler.bound import (
     BoundExpr,
     BoundLiteral,
     BoundUnary,
+    BoundIsNull,
 )
 from minidb.compiler.plan import (
     CreateTablePlan,
@@ -22,6 +23,11 @@ from minidb.compiler.plan import (
     Plan,
     ProjectPlan,
     SeqScanPlan,
+    IndexScanPlan,
+    UpdatePlan,
+    CreateIndexPlan,
+    DescribePlan,
+    ExplainPlan,
     validate_plan,
 )
 from minidb.core.expressions import ExprOp, resolve_result_type
@@ -43,6 +49,10 @@ class Optimizer:
         return optimized
 
     def _optimize_plan(self, plan: Plan) -> Plan:
+        # 新Plan接口适配：这些节点尚无优化规则，校验后原样交给后续阶段。
+        # 不在此处代写UPDATE、索引或EXPLAIN的优化/执行实现。
+        if isinstance(plan, (IndexScanPlan, UpdatePlan, CreateIndexPlan, DescribePlan, ExplainPlan)):
+            return plan
         if isinstance(plan, CreateTablePlan):
             return CreateTablePlan(plan.table_name, plan.schema, plan.span)
         if isinstance(plan, InsertPlan):
@@ -65,7 +75,8 @@ class Optimizer:
         raise TypeError(f"unsupported plan type: {type(plan).__name__}")
 
     def _optimize_expr(self, expr: BoundExpr) -> BoundExpr:
-        if isinstance(expr, (BoundColumn, BoundLiteral)):
+        if isinstance(expr, (BoundColumn, BoundLiteral, BoundIsNull)):
+            # BoundIsNull是新提供的节点；保持原式，不猜测其运行时结果。
             return expr
 
         if isinstance(expr, BoundUnary):
@@ -75,7 +86,8 @@ class Optimizer:
                 return BoundLiteral(not operand.value, DataType.BOOL, expr.span)
             if operand is expr.operand:
                 return expr
-            return BoundUnary(expr.op, operand, expr.data_type, expr.op_span, expr.span)
+            return BoundUnary(expr.op, operand, expr.type_spec, expr.op_span, expr.span,
+                              operand.nullable)
 
         if isinstance(expr, BoundBinary):
             left = self._optimize_expr(expr.left)
@@ -92,7 +104,9 @@ class Optimizer:
 
             if left is expr.left and right is expr.right:
                 return expr
-            return BoundBinary(expr.op, left, right, expr.data_type, expr.op_span, expr.span)
+            # 重建节点必须随新操作数传播nullable，不能退回旧接口的默认False。
+            return BoundBinary(expr.op, left, right, expr.type_spec, expr.op_span, expr.span,
+                               left.nullable or right.nullable)
 
         raise TypeError(f"unsupported bound expression type: {type(expr).__name__}")
 
@@ -127,6 +141,10 @@ def _simplify_boolean(op: ExprOp, left: BoundExpr, right: BoundExpr) -> BoundExp
 
 def _fold_literals(node: BoundBinary, left: BoundLiteral, right: BoundLiteral) -> BoundLiteral | None:
     """只折叠已通过统一类型规则的常量运算。"""
+    if left.value is None or right.value is None:
+        # v2新增NULL后，Python的None比较/真值转换不能代表SQL的UNKNOWN。
+        # 当前没有NULL常量折叠规则，保留原表达式，由正式求值模块处理。
+        return None
     if resolve_result_type(node.op, (left.data_type, right.data_type)) is not DataType.BOOL:
         return None
     if node.op is ExprOp.EQ:

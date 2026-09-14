@@ -2,12 +2,12 @@
 
 from typing import Protocol, runtime_checkable
 
-from minidb.core.schema import TableDef
+from minidb.core.schema import TableDef, IndexDef
 
 
 @runtime_checkable
 class CatalogRead(Protocol):
-    """只约定查表和列举用户表；Protocol 不提供运行时权限隔离。"""
+    """语义和优化器只读接口；不允许通过此协议修改表或索引目录。"""
 
     def find_table(self, name: str) -> TableDef | None:
         """名称大小写不敏感，合法但不存在的表名返回 None。"""
@@ -15,6 +15,14 @@ class CatalogRead(Protocol):
 
     def list_tables(self) -> list[TableDef]:
         """按 table_id 升序返回用户表的新列表。"""
+        ...
+
+    def find_index(self, name: str) -> IndexDef | None:
+        """按全库唯一索引名查询；不存在返回None。"""
+        ...
+
+    def indexes_for_table(self, table_id: int) -> tuple[IndexDef, ...]:
+        """按index_id返回指定用户表的全部自动和用户索引。"""
         ...
 
 

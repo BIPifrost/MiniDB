@@ -1,12 +1,10 @@
-"""张振：Semantic、Optimizer、Executor 共用的表达式操作及类型规则。"""
-
+"""统一表达式操作和类型规则；三值逻辑的实际求值由执行器负责。"""
 from enum import Enum
-
-from minidb.core.schema import DataType
+from minidb.core.schema import DataType, TypeSpec
+from minidb.core._v2_contract import fail
 
 
 class ExprOp(Enum):
-    """表达式操作符：EQ/NE 是等于/不等于，LT/LE/GT/GE 是大小比较，其余是逻辑运算。"""
     EQ = "EQ"
     NE = "NE"
     LT = "LT"
@@ -18,52 +16,36 @@ class ExprOp(Enum):
     NOT = "NOT"
 
 
-def resolve_result_type(
-    op: ExprOp, operand_types: tuple[DataType, ...]
-) -> DataType | None:
-    """查询一种运算是否允许；合法返回 BOOL，类型或元数不匹配返回 None。
-
-    原始字符串等不符合接口的参数属于编程错误，按约定报 PLAN 阶段的
-    INVALID_ARGUMENT。此处不读取数据、不求值、不附加 SQL 源码位置。
-    """
+def resolve_result_type(op, operand_types):
+    """保留公开返回 DataType 的接口；输入接受完整TypeSpec和未定型NULL。"""
     if not isinstance(op, ExprOp):
-        _invalid("op", "ExprOp", op)
-    if not isinstance(operand_types, tuple):
-        _invalid("operand_types", "tuple[DataType, ...]", operand_types)
-    for index, data_type in enumerate(operand_types):
-        if not isinstance(data_type, DataType):
-            _invalid(f"operand_types[{index}]", "DataType", data_type)
-
+        _argument_error("op", "ExprOp", op)
+    if type(operand_types) is not tuple:
+        _argument_error("operand_types", "tuple", operand_types)
+    for index, value in enumerate(operand_types):
+        if value is not None and not isinstance(value, (DataType, TypeSpec)):
+            _argument_error(f"operand_types[{index}]", "TypeSpec/DataType/None", value)
+    types = tuple(value.kind if isinstance(value, TypeSpec) else value for value in operand_types)
     if op is ExprOp.NOT:
-        return DataType.BOOL if operand_types == (DataType.BOOL,) else None
-
-    if len(operand_types) != 2:
+        return DataType.BOOL if len(types) == 1 and types[0] in (None, DataType.BOOL) else None
+    if len(types) != 2:
         return None
-    left, right = operand_types
-
     if op in (ExprOp.AND, ExprOp.OR):
-        valid = left is DataType.BOOL and right is DataType.BOOL
-    elif op in (ExprOp.EQ, ExprOp.NE):
-        valid = left is right and left in (DataType.INT, DataType.VARCHAR)
-    else:  # LT / LE / GT / GE 只接受两个 INT。
-        valid = left is DataType.INT and right is DataType.INT
+        valid = all(value in (None, DataType.BOOL) for value in types)
+    else:
+        left, right = types
+        # NULL接受另一侧的上下文；两侧NULL比较仍返回可空BOOL。
+        left, right = left or right, right or left
+        if left is None:
+            valid = True
+        elif left in (DataType.INT, DataType.DECIMAL) and right in (DataType.INT, DataType.DECIMAL):
+            valid = True
+        else:
+            valid = left is right and (left in (DataType.VARCHAR, DataType.DATE)
+                                      or left is DataType.BOOL and op in (ExprOp.EQ, ExprOp.NE))
     return DataType.BOOL if valid else None
 
 
-def _invalid(field: str, expected: str, actual: object) -> None:
-    # 依赖赵凯航维护的公共错误契约；类型组合查询本身无需该模块。
-    """类型查询接口的参数错误固定报告为 PLAN/INVALID_ARGUMENT。"""
-    from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
-
-    raise DbError(
-        stage=ErrorStage.PLAN,
-        code=INVALID_ARGUMENT,
-        message=f"resolve_result_type 的 {field} 参数不合法",
-        span=None,
-        context={
-            "operation": "resolve_result_type",
-            "field": field,
-            "expected": expected,
-            "actual": repr(actual),
-        },
-    )
+def _argument_error(field, expected, actual):
+    fail("INVALID_ARGUMENT", "类型规则调用参数不合法", stage="PLAN",
+         operation="resolve_result_type", field=field, expected=expected, actual=repr(actual))

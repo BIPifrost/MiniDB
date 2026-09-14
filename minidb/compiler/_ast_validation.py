@@ -1,101 +1,136 @@
-"""张振：检查 Semantic 收到的 AST 结构，防止手工构造的坏节点进入绑定。
-
-这里只消费赵凯航的 compiler/ast.py，不定义 AST，也不解析 SQL。
-字段名依据工作计划 15.4 节；依赖的源码位置由 core/source.py 提供。
+"""只消费赵凯航的 AST；未提供的新类不在此处定义替身。
+待提供：TypeDecl、ConstraintDecl、Assignment、UpdateStmt、CreateIndexStmt、
+DescribeStmt、ExplainStmt、IsNullExpr，字段遵循优化计划第7.1节。
 """
-
+from minidb.compiler import ast
 from minidb.compiler._checks import Check
+from minidb.core.schema import TypeSpec, DataType
 from minidb.core.expressions import ExprOp
-from minidb.core.schema import DataType
 
 
-def validate_ast(stmt) -> None:
-    """先检查完整结构，再由 Semantic 检查名字和类型的业务含义。"""
-    from minidb.compiler import ast
+def is_ast(node, name):
+    """只接受正式模块公开的类；测试替身必须由测试显式注入该模块。"""
+    return isinstance(node, getattr(ast, name, ()))
 
+
+def literal_type(node):
+    # 只读过渡旧LiteralExpr，待前端升级后可删除data_type分支。
+    value = node.type_spec if hasattr(node, "type_spec") else node.data_type
+    return TypeSpec(value) if isinstance(value, DataType) else value
+
+
+def validate_ast(stmt):
     check = Check("Semantic.analyze")
-    statement_types = (ast.CreateTableStmt, ast.InsertStmt, ast.SelectStmt, ast.DeleteStmt)
-    check.require(isinstance(stmt, statement_types), "stmt", "四类正式 Statement", type(stmt).__name__)
+    names = ("CreateTableStmt", "InsertStmt", "SelectStmt", "DeleteStmt",
+             "UpdateStmt", "CreateIndexStmt", "DescribeStmt", "ExplainStmt")
+    check.require(any(is_ast(stmt, name) for name in names), "stmt", "正式Statement", type(stmt).__name__)
     check.span(stmt.span)
-    _name_ref(stmt.table_name, stmt.span, check)
-
-    if isinstance(stmt, ast.CreateTableStmt):
-        check.require(isinstance(stmt.columns, tuple), "columns", "tuple[ColumnDecl, ...]", type(stmt.columns).__name__)
+    if is_ast(stmt, "ExplainStmt"):
+        check.require(any(is_ast(stmt.statement, kind) for kind in
+                          ("InsertStmt", "SelectStmt", "DeleteStmt", "UpdateStmt")),
+                      "statement", "可EXPLAIN语句", type(stmt.statement).__name__)
+        check.span(stmt.statement.span, parent=stmt.span)
+        validate_ast(stmt.statement)
+        return
+    name = stmt.table if any(is_ast(stmt, kind) for kind in
+                            ("UpdateStmt", "CreateIndexStmt", "DescribeStmt")) else stmt.table_name
+    _name(name, stmt.span, check)
+    if is_ast(stmt, "CreateTableStmt"):
+        check.require(type(stmt.columns) is tuple, "columns", "tuple", type(stmt.columns).__name__)
         for column in stmt.columns:
-            check.require(isinstance(column, ast.ColumnDecl), "columns", "ColumnDecl", type(column).__name__)
-            check.span(column.span, "column.span", stmt.span)
-            _name_ref(column.name, column.span, check)
-            check.span(column.type_span, "type_span", column.span)
-            check.require(isinstance(column.data_type, DataType), "data_type", "DataType", repr(column.data_type))
-    elif isinstance(stmt, ast.InsertStmt):
+            check.require(is_ast(column, "ColumnDecl"), "column", "ColumnDecl", type(column).__name__)
+            check.span(column.span, parent=stmt.span)
+            _name(column.name, column.span, check)
+            if hasattr(column, "type_decl"):
+                check.require(is_ast(column.type_decl, "TypeDecl"), "type_decl", "TypeDecl", type(column.type_decl).__name__)
+                check.span(column.type_decl.span, parent=column.span)
+                check.require(isinstance(column.type_decl.kind, DataType), "kind", "DataType", column.type_decl.kind)
+                check.require(type(column.constraints) is tuple, "constraints", "tuple", type(column.constraints).__name__)
+                for constraint in column.constraints:
+                    check.require(is_ast(constraint, "ConstraintDecl"), "constraint", "ConstraintDecl", type(constraint).__name__)
+                    check.span(constraint.span, parent=column.span)
+                    if constraint.value is not None:
+                        check.require(is_ast(constraint.value, "LiteralExpr"), "default", "LiteralExpr", type(constraint.value).__name__)
+                        _expression(constraint.value, constraint.span, check)
+            else:
+                check.require(isinstance(column.data_type, DataType), "data_type", "DataType", column.data_type)
+                check.span(column.type_span, parent=column.span)
+    elif is_ast(stmt, "InsertStmt"):
         _names(stmt.columns, stmt.span, check)
-        check.require(isinstance(stmt.values, tuple) and bool(stmt.values), "values", "非空 tuple[LiteralExpr, ...]", type(stmt.values).__name__)
+        check.require(type(stmt.values) is tuple and bool(stmt.values), "values", "非空tuple", type(stmt.values).__name__)
         for value in stmt.values:
-            check.require(isinstance(value, ast.LiteralExpr), "values", "LiteralExpr", type(value).__name__)
+            check.require(is_ast(value, "LiteralExpr"), "value", "LiteralExpr", type(value).__name__)
             _expression(value, stmt.span, check)
-    elif isinstance(stmt, ast.SelectStmt):
-        check.require(type(stmt.select_all) is bool, "select_all", "bool", stmt.select_all)
-        check.require(isinstance(stmt.columns, tuple), "columns", "tuple[NameRef, ...]", type(stmt.columns).__name__)
+    elif is_ast(stmt, "SelectStmt"):
+        check.require(type(stmt.select_all) is bool and type(stmt.columns) is tuple,
+                      "select_all/columns", "bool、tuple", type(stmt.columns).__name__)
         if stmt.select_all:
-            check.require(not stmt.columns, "columns", "SELECT * 的列列表为空", repr(stmt.columns))
+            check.require(not stmt.columns, "columns", "星号时为空", len(stmt.columns))
         else:
             _names(stmt.columns, stmt.span, check)
+    elif is_ast(stmt, "UpdateStmt"):
+        check.require(type(stmt.assignments) is tuple and bool(stmt.assignments),
+                      "assignments", "非空tuple", type(stmt.assignments).__name__)
+        for assignment in stmt.assignments:
+            check.require(is_ast(assignment, "Assignment"), "assignment", "Assignment", type(assignment).__name__)
+            check.span(assignment.span, parent=stmt.span)
+            _name(assignment.target, assignment.span, check)
+            check.require(is_ast(assignment.value, "IdentifierExpr") or is_ast(assignment.value, "LiteralExpr"),
+                          "value", "列引用或常量", type(assignment.value).__name__)
+            _expression(assignment.value, assignment.span, check)
+    elif is_ast(stmt, "CreateIndexStmt"):
+        _name(stmt.name, stmt.span, check)
+        _name(stmt.column, stmt.span, check)
+        check.require(type(stmt.unique) is bool, "unique", "bool", stmt.unique)
+    predicate = stmt.predicate if is_ast(stmt, "UpdateStmt") else getattr(stmt, "where", None)
+    if predicate is not None:
+        _expression(predicate, stmt.span, check)
 
-    if isinstance(stmt, (ast.SelectStmt, ast.DeleteStmt)) and stmt.where is not None:
-        _expression(stmt.where, stmt.span, check)
+
+def _name(name, parent, check):
+    check.require(is_ast(name, "NameRef"), "name", "NameRef", type(name).__name__)
+    check.require(type(name.text) is str, "name.text", "str", type(name.text).__name__)
+    check.span(name.span, parent=parent)
 
 
-def _name_ref(name, parent, check: Check) -> None:
-    """NameRef 保存原始文字和位置；合法字符、关键字稍后再检查。"""
-    from minidb.compiler.ast import NameRef
-
-    check.require(isinstance(name, NameRef), "name", "NameRef", type(name).__name__)
-    check.require(isinstance(name.text, str), "name.text", "str", type(name.text).__name__)
-    check.span(name.span, "name.span", parent)
-
-
-def _names(names, parent, check: Check) -> None:
-    """INSERT 和显式 SELECT 列表必须是非空的不可变序列。"""
-    check.require(isinstance(names, tuple) and bool(names), "columns", "非空 tuple[NameRef, ...]", type(names).__name__)
+def _names(names, parent, check):
+    check.require(type(names) is tuple and bool(names), "columns", "非空tuple", type(names).__name__)
     for name in names:
-        _name_ref(name, parent, check)
+        _name(name, parent, check)
 
 
-def _expression(expr, parent, check: Check) -> None:
-    """用栈检查表达式和子节点位置；active 用来识别循环引用。"""
-    from minidb.compiler import ast
-
-    # leaving=False 表示第一次进入节点，True 表示其子节点已检查完毕。
-    pending = [(expr, parent, False)]
-    active: set[int] = set()
-    validated: set[int] = set()
-    expression_types = (ast.IdentifierExpr, ast.LiteralExpr, ast.UnaryExpr, ast.BinaryExpr)
+def _expression(expr, parent, check):
+    pending, active, done = [(expr, parent, False)], set(), set()
     while pending:
         node, enclosing, leaving = pending.pop()
         if leaving:
             active.remove(id(node))
-            validated.add(id(node))
+            done.add(id(node))
             continue
-        check.require(isinstance(node, expression_types), "expression", "正式 Expr", type(node).__name__)
-        check.require(id(node) not in active, "expression", "无环 AST", type(node).__name__)
-        check.span(node.span, "expression.span", enclosing)
-        # 父范围每次都检查；共享子树的内部字段只需在本次调用中检查一次。
-        if id(node) in validated:
+        check.require(any(is_ast(node, kind) for kind in
+                          ("IdentifierExpr", "LiteralExpr", "UnaryExpr", "BinaryExpr", "IsNullExpr")),
+                      "expression", "正式Expr", type(node).__name__)
+        check.require(id(node) not in active, "expression", "无环AST", type(node).__name__)
+        check.span(node.span, parent=enclosing)
+        if id(node) in done:
             continue
-        if isinstance(node, ast.IdentifierExpr):
-            check.require(isinstance(node.name, str), "name", "str", type(node.name).__name__)
-        elif isinstance(node, ast.LiteralExpr):
-            # 用户 AST 不允许 BOOL，也不允许把 bool 当作 INT。
-            check.value(node.value, node.data_type)
+        if is_ast(node, "IdentifierExpr"):
+            check.require(type(node.name) is str, "name", "str", type(node.name).__name__)
+        elif is_ast(node, "LiteralExpr"):
+            typ = literal_type(node)
+            check.require(isinstance(typ, TypeSpec) or typ is None and node.value is None,
+                          "type_spec", "TypeSpec或未定型NULL", typ)
         else:
-            unary = isinstance(node, ast.UnaryExpr)
-            valid_op = node.op is ExprOp.NOT if unary else isinstance(node.op, ExprOp) and node.op is not ExprOp.NOT
-            check.require(valid_op, "op", "节点对应的 ExprOp", repr(node.op))
-            check.span(node.op_span, "op_span", node.span)
+            check.span(node.op_span, parent=node.span)
+            if is_ast(node, "IsNullExpr"):
+                check.require(type(node.negated) is bool, "negated", "bool", node.negated)
+            else:
+                valid = node.op is ExprOp.NOT if is_ast(node, "UnaryExpr") else (
+                    isinstance(node.op, ExprOp) and node.op is not ExprOp.NOT)
+                check.require(valid, "op", "节点对应的ExprOp", node.op)
+            children = (node.left, node.right) if is_ast(node, "BinaryExpr") else (node.operand,)
             active.add(id(node))
             pending.append((node, enclosing, True))
-            children = (node.operand,) if unary else (node.left, node.right)
-            # 栈后进先出，所以先放右边，才能按左、右的顺序检查。
             pending.extend((child, node.span, False) for child in reversed(children))
             continue
-        validated.add(id(node))
+        done.add(id(node))

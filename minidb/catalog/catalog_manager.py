@@ -1,207 +1,206 @@
-"""张振：通过存储接口管理系统目录，连接只读 Catalog 与目录持久化。
+"""v2目录的加载、预检和事务内发布；不实现页、事务、令牌消费或索引算法。
 
-外部接口已经由计划 7.3、7.4、15.2 节确定，这里只调用，不实现：
-周升荣的 StorageEngine：
-    initialize_reserved_heap(table: TableDef) -> None
-    validate_table_root(table: TableDef) -> None
-    scan_rows(table: TableDef) -> RowScan
-    insert_row(table: TableDef, row: Row) -> RowId
-其中 RowScan 可迭代 StoredRow，提供 close() -> None；StoredRow 有 values、row_id。
-赵凯航的 RowCodec()：encoded_size(row: Row, schema: Schema) -> int。
-公共 DbError(stage, code, message, span, context) 已复用队友写好的实现。
-
-会话由 CLI/Session 装配。sync/close/abort 仍由 Session 调度；本模块不会
-自行创建文件、实现页读写或用 JSON 文件替代系统目录。
+尚未提供的装配接口：
+    StorageEngine.catalog_services: CatalogServices
+由Session装配下列服务，其中 write_catalog_rows(table, rows) -> None 是拟定的
+目录写入适配接口：必须使用Session签发的目录写令牌并调用正式StorageEngine，
+不得省略token、开启第二个事务或在适配层复制约束规则。
+format_version() -> int 必须返回实际已验证文件版本；不是让调用方随意填常量。
+validate_index_root(index, table) -> None 由IndexManager校验锚点及页归属。
+目前真实StorageEngine未提供这些接口，因此会明确停止，不尝试写v1文件。
 """
+from dataclasses import dataclass
+from collections.abc import Callable
+from minidb.catalog.catalog import Catalog, SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE
+from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows, index_to_catalog_row
+from minidb.core._v2_contract import fail, require_method
+from minidb.core.schema import MAX_USER_TABLE_ID, TableDef, IndexDef
+from minidb.core.transaction import TransactionGuard, TransactionState
 
-from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, NoReturn
-
-from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE, Catalog
-from minidb.catalog.catalog_rows import catalog_from_rows, table_to_catalog_rows
-from minidb.core.disk_types import PAGE_SIZE
-from minidb.core.errors import CATALOG_CORRUPTED, DbError
-from minidb.core.schema import TableDef
-from minidb.storage.data_page import DATA_PAGE_HEADER_SIZE, RECORD_SLOT_SIZE
-
-if TYPE_CHECKING:
-    from minidb.core.records import Row
-    from minidb.storage.storage_engine import StorageEngine
+@dataclass(frozen=True, slots=True)
+class CatalogServices:
+    """仅描述目录所依赖的服务；实现和装配归相应模块负责人。"""
+    guard: TransactionGuard
+    codec: object
+    format_version: Callable
+    write_catalog_rows: Callable
+    validate_index_root: Callable
 
 
 class CatalogManager:
-    """维护当前目录快照和下一表号；通过 bootstrap_or_load 完成启动。"""
-
-    def __init__(self, storage: StorageEngine, catalog: Catalog) -> None:
-        """保存已加载目录，并从现有最大表号之后继续编号。"""
-        # storage 是同一会话传入的实例，不能在这里再创建第二套存储。
+    def __init__(self, storage, catalog: Catalog):
         self._storage = storage
+        self._services = _services(storage)
+        if not isinstance(catalog, Catalog):
+            fail("INVALID_ARGUMENT", "catalog必须是Catalog")
         self._catalog = catalog
-        self._next_table_id = max((table.ref.table_id for table in catalog.tables), default=0) + 1
+        self._generation = 0
+        self._reset_next_ids()
 
     @classmethod
-    def bootstrap_or_load(cls, storage: StorageEngine, is_new: bool) -> CatalogManager:
-        """新文件初始化目录根页；已有文件完整读取并校验后才返回管理器。"""
+    def bootstrap_or_load(cls, storage, is_new: bool):
         if type(is_new) is not bool:
-            _error("INVALID_ARGUMENT", "is_new 必须为 bool", "bootstrap_or_load",
-                   field="is_new", expected="bool", actual=repr(is_new))
-        # 检查目录实际需要的存储方法；具体存储对象由会话传入。
-        for method in ("initialize_reserved_heap", "validate_table_root", "scan_rows", "insert_row"):
-            if not callable(getattr(storage, method, None)):
-                _error("INVALID_ARGUMENT", "存储对象缺少目录所需接口", "bootstrap_or_load",
-                       field="storage", expected=method, actual=type(storage).__name__)
+            fail("INVALID_ARGUMENT", "is_new必须为bool")
+        manager = cls(storage, Catalog())
+        services = manager._services
+        if is_new:
+            services.guard.require(TransactionState.BOOTSTRAP, operation="catalog.bootstrap")
+            # 首次初始化前已经验收外部接口；空目录没有要编码的行。
+            init = require_method(storage, "initialize_reserved_heap",
+                                  "initialize_reserved_heap(table: TableDef) -> None")
+            for table in (SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE):
+                init(table)
+                storage.validate_table_root(table)
+        else:
+            services.guard.require(TransactionState.READ_ONLY_STARTUP, TransactionState.RECOVERY,
+                                   TransactionState.IDLE, operation="catalog.load")
+            manager._catalog = manager._read_snapshot()
+            manager._reset_next_ids()
+        return manager
 
-        with _catalog_context("bootstrap_or_load"):
-            if is_new:
-                # page 1 是否真是全零预留页、文件是否为新文件，由此正式接口复核。
-                # 不能单凭调用者传来的 True 无条件清空页面。
-                storage.initialize_reserved_heap(SYSTEM_CATALOG_TABLE)
-                storage.validate_table_root(SYSTEM_CATALOG_TABLE)
-                catalog = Catalog()
-            else:
-                storage.validate_table_root(SYSTEM_CATALOG_TABLE)
-                catalog = _load_catalog(storage)
-                for table in catalog.tables:
-                    with _catalog_context("validate_table_root", table_id=table.ref.table_id,
-                                          table_name=table.ref.name):
-                        storage.validate_table_root(table)
-        return cls(storage, catalog)
+    @property
+    def generation(self) -> int:
+        return self._generation
 
     def find_table(self, name: str) -> TableDef | None:
-        """实现 CatalogRead：大小写不敏感地查询用户表，没有则返回 None。"""
         return self._catalog.find_table(name)
 
     def list_tables(self) -> list[TableDef]:
-        """返回按表号排序的新列表，调用者不能通过它改写当前目录。"""
         return self._catalog.list_tables()
 
+    def find_index(self, name: str) -> IndexDef | None:
+        return self._catalog.find_index(name)
+
+    def indexes_for_table(self, table_id: int) -> tuple[IndexDef, ...]:
+        return self._catalog.indexes_for_table(table_id)
+
+    def validate_integrity(self):
+        """Session提交前调用；不负责提交事务。"""
+        self._catalog.validate_integrity()
+
+    def _reset_next_ids(self):
+        self._next_table_id = max((t.ref.table_id for t in self._catalog.tables), default=0) + 1
+        self._next_index_id = max((i.index_id for i in self._catalog.indexes), default=0) + 1
+
+    def _reserve(self, attribute, kind):
+        self._active("catalog.reserve_" + kind + "_id")
+        value = getattr(self, attribute)
+        if value > MAX_USER_TABLE_ID:
+            fail("ID_EXHAUSTED", "编号已耗尽", stage="STORAGE", id_kind=kind, limit=MAX_USER_TABLE_ID)
+        setattr(self, attribute, value + 1)
+        return value
+
     def reserve_table_id(self) -> int:
-        """领取一次递增表号；失败建表可以留下空号，不把旧表号重新发出去。"""
-        if self._next_table_id > 0xFFFFFFFE:
-            _error("ID_EXHAUSTED", "用户表号已经用尽", "reserve_table_id",
-                   id_kind="table", limit=0xFFFFFFFE)
-        table_id = self._next_table_id
-        self._next_table_id += 1
-        return table_id
+        return self._reserve("_next_table_id", "table")
+
+    def reserve_index_id(self) -> int:
+        """索引申请号与页分配分离；prepare阶段不得调用。"""
+        return self._reserve("_next_index_id", "index")
+
+    def _active(self, operation):
+        self._services.guard.require(TransactionState.ACTIVE, operation=operation)
 
     def persist_and_register(self, table: TableDef) -> None:
-        """校验 → 写每一列的目录记录 → 发布新快照。同步成功由 Session 确认。"""
-        operation = "persist_and_register"
-        if not isinstance(table, TableDef) or table.ref.table_id == 0:
-            _error("INVALID_ARGUMENT", "只能注册完整的用户表定义", operation,
-                   field="table", expected="用户 TableDef", actual=repr(table))
+        self._active("catalog.persist_table")
+        if not isinstance(table, TableDef):
+            fail("INVALID_ARGUMENT", "需要TableDef")
         if self.find_table(table.ref.name) is not None:
-            _error("TABLE_EXISTS", "表名已经登记", operation, table_name=table.ref.name)
-        for existing in self._catalog.tables:
-            for field in ("table_id", "root_page_id"):
-                if getattr(existing.ref, field) == getattr(table.ref, field):
-                    _error("INVALID_ARGUMENT", "表号或根页号已经登记", operation,
-                           field=field, expected="未登记的编号", actual=getattr(table.ref, field))
+            fail("TABLE_EXISTS", "表名已经存在", table_name=table.ref.name)
+        candidate = Catalog(self._catalog.tables + (table,), self._catalog.indexes)
+        rows = table_to_catalog_rows(table)
+        self.preflight_rows(SYSTEM_CATALOG_TABLE, rows)
+        self._storage.validate_table_root(table)
+        self._services.write_catalog_rows(SYSTEM_CATALOG_TABLE, rows)
+        # 写失败不会发布候选；磁盘回滚必须由Session/TransactionManager完成。
+        self._catalog = candidate
+        self._next_table_id = max(self._next_table_id, table.ref.table_id + 1)
 
-        with _catalog_context(operation, table_id=table.ref.table_id, table_name=table.ref.name):
-            rows = table_to_catalog_rows(table)
+    def persist_and_register_index(self, index: IndexDef) -> None:
+        self._active("catalog.persist_index")
+        if not isinstance(index, IndexDef):
+            fail("INVALID_ARGUMENT", "需要IndexDef")
+        if self.find_index(index.name) is not None:
+            fail("INDEX_EXISTS", "索引名已经存在", index_name=index.name)
+        candidate = Catalog(self._catalog.tables, self._catalog.indexes + (index,))
+        rows = (index_to_catalog_row(index),)
+        self.preflight_rows(SYSTEM_INDEXES_TABLE, rows)
+        table = next(t for t in candidate.tables if t.ref.table_id == index.table_id)
+        self._services.validate_index_root(index, table)
+        self._services.write_catalog_rows(SYSTEM_INDEXES_TABLE, rows)
+        self._catalog = candidate
+        self._next_index_id = max(self._next_index_id, index.index_id + 1)
+
+    def preflight_rows(self, table, rows):
+        """prepare阶段可调用：全部记录编码检查后才允许进入写阶段。"""
+        for row in rows:
+            size = self._services.codec.encoded_size(row, table.schema)
+            if type(size) is not int or size < 0:
+                fail("INVALID_ARGUMENT", "RowCodec.encoded_size必须返回非负整数")
+            if size > 4056:
+                fail("ROW_TOO_LARGE", "目录行不能放入空数据页", stage="STORAGE",
+                     encoded_size=size, max_size=4056)
+
+    def reload_from_storage(self) -> None:
+        self._services.guard.require(TransactionState.IDLE, TransactionState.RECOVERY,
+                                     TransactionState.ROLLING_BACK, operation="catalog.reload")
+        candidate = self._read_snapshot()
+        # 所有表、列、索引和根页校验成功才一次替换，失败不改变generation。
+        self._catalog = candidate
+        self._reset_next_ids()
+        self._generation += 1
+
+    def _read_snapshot(self):
+        for table in (SYSTEM_CATALOG_TABLE, SYSTEM_INDEXES_TABLE):
             self._storage.validate_table_root(table)
-            _preflight_rows(rows)
-            # 先构造候选快照，尽早发现逻辑问题。此变量尚未成为公开目录。
-            candidate = Catalog(self._catalog.tables + (table,))
-            for row in rows:
-                self._storage.insert_row(SYSTEM_CATALOG_TABLE, row)
-            # 如果第 N 行写失败，控制流不会走到这里，旧内存目录仍保留。
-            # 已经写出的磁盘内容不保证回滚，异常交给 Session 终止会话。
-            self._catalog = candidate
-            self._next_table_id = max(self._next_table_id, table.ref.table_id + 1)
+        # 目录最多128*64列；读入时也设上限，避免损坏页链耗尽内存。
+        rows = _read_rows(self._storage, SYSTEM_CATALOG_TABLE, 128 * 64)
+        indexes = _read_rows(self._storage, SYSTEM_INDEXES_TABLE, 16381)
+        candidate = catalog_from_rows(rows, indexes)
+        for table in candidate.tables:
+            self._storage.validate_table_root(table)
+        by_id = {table.ref.table_id: table for table in candidate.tables}
+        for index in candidate.indexes:
+            self._services.validate_index_root(index, by_id[index.table_id])
+        return candidate
 
 
-def _preflight_rows(rows: tuple[Row, ...]) -> None:
-    """所有目录行先检查可编码性和大小，避免写到一半才发现普通参数问题。"""
-    from minidb.storage.row_codec import RowCodec
+def _services(storage):
+    services = getattr(storage, "catalog_services", None)
+    if not isinstance(services, CatalogServices):
+        raise NotImplementedError("StorageEngine.catalog_services: CatalogServices 尚未提供；v1文件不能写入v2目录")
+    if not isinstance(services.guard, TransactionGuard):
+        fail("INVALID_ARGUMENT", "目录必须共享正式TransactionGuard")
+    for name in ("format_version", "write_catalog_rows", "validate_index_root"):
+        require_method(services, name, name + "(...)")
+    require_method(services.codec, "encoded_size", "encoded_size(row, schema) -> int")
+    for name in ("validate_table_root", "scan_rows"):
+        require_method(storage, name, name + "(table: TableDef)")
+    version = services.format_version()
+    if type(version) is not int or version != 2:
+        fail("FORMAT_VERSION_UNSUPPORTED", "目录只支持v2文件；旧库须离线迁移", stage="STORAGE",
+             actual=repr(version), expected=2)
+    return services
 
-    codec = RowCodec()
-    # 共用已有页格式常量：4096 字节页 - 32 字节页头 - 8 字节记录槽。
-    max_size = PAGE_SIZE - DATA_PAGE_HEADER_SIZE - RECORD_SLOT_SIZE
-    for row in rows:
-        size = codec.encoded_size(row, SYSTEM_CATALOG_TABLE.schema)
-        if size > max_size:
-            _error("ROW_TOO_LARGE", "目录记录无法放入一张空数据页", "persist_and_register",
-                   encoded_size=size, max_size=max_size)
 
-
-def _load_catalog(storage: StorageEngine) -> Catalog:
-    """从 StoredRow.values 恢复目录，并在所有路径上关闭扫描资源。"""
-    scan = storage.scan_rows(SYSTEM_CATALOG_TABLE)
-    primary_error = None
-    current_row_id = None
-
-    def catalog_values():
-        """逐行交出目录值，仅在当前行接受校验期间保留它的物理位置。"""
-        nonlocal current_row_id
-        for record in scan:
-            current_row_id = record.row_id
-            # yield 在这里暂停，catalog_from_rows 随即检查这一行。
-            # 如果校验失败，外层 except 仍能拿到对应的页号和槽号。
-            yield record.values
-            # 当前行通过后再清空位置，避免后续读取失败或整表缺列时误标上一行。
-            current_row_id = None
-
+def _read_rows(storage, table, limit):
+    scan = storage.scan_rows(table)
+    error = None
+    rows = []
     try:
-        # catalog_from_rows 已实现七字段检查、分组、缺列检查和列序恢复。
-        return catalog_from_rows(catalog_values())
-    except BaseException as error:
-        # 保留第一次失败；包括用户中断时也必须释放活动扫描。
-        primary_error = error
-        if (isinstance(error, DbError) and error.code == CATALOG_CORRUPTED
-                and current_row_id is not None and "row_id" not in error.context):
-            # 即使 table_id 本身损坏，也能定位目录记录；上下文只保存 JSON 基本值。
-            error._update_context(row_id={
-                "page_id": current_row_id.page_id, "slot_id": current_row_id.slot_id,
-            })
+        for record in scan:
+            if len(rows) >= limit:
+                fail("CATALOG_CORRUPTED", "目录记录超过文件/表资源上限", stage="STORAGE",
+                     table_name=table.ref.name, limit=limit)
+            rows.append(record.values)
+        return tuple(rows)
+    except BaseException as caught:
+        error = caught
         raise
     finally:
         try:
             scan.close()
-        except Exception as cleanup_error:
-            if primary_error is None:
+        except Exception as cleanup:
+            if error is None:
                 raise
-            _record_cleanup_error(primary_error, cleanup_error)
-
-
-@contextmanager
-def _catalog_context(operation: str, **details):
-    """为底层 DbError 补目录上下文，保留原 code、stage 和异常对象。"""
-    try:
-        yield
-    except DbError as error:
-        # 目录上下文默认使用系统目录名，但不能覆盖调用方传入的用户表名。
-        # 否则用户表根页校验失败时，错误会被误报为 _sys_catalog 损坏，
-        # 导致上层无法准确定位实际出错的表。
-        updates = {"operation": operation, **details}
-        updates.setdefault("table_name", SYSTEM_CATALOG_TABLE.ref.name)
-        # 公共错误上下文只读，通过正式补充接口保留底层已提供的字段。
-        missing = {key: value for key, value in updates.items() if key not in error.context}
-        error._update_context(**missing)
-        raise
-
-
-def _record_cleanup_error(primary: BaseException, cleanup: Exception) -> None:
-    """读取失败和 close 同时失败时，保留主错误并附上清理失败信息。"""
-    # 正式接口的 close 错误应为无 SQL 位置的 DbError，可写入规划要求的数组。
-    if isinstance(primary, DbError) and isinstance(cleanup, DbError):
-        primary._update_context(cleanup_errors=[*primary.context.get("cleanup_errors", ()), {
-            "stage": cleanup.stage.name,
-            "code": cleanup.code,
-            "message": cleanup.message,
-            "context": cleanup.context,
-        }])
-    else:
-        # 未预期的编程异常仍交给会话处理；Python 3.11 的 note 保存第二个原因。
-        primary.add_note(f"关闭目录扫描时又发生 {type(cleanup).__name__}: {cleanup}")
-
-
-def _error(code: str, message: str, operation: str, **context) -> NoReturn:
-    """目录持久化的错误属于 STORAGE；错误类和代码取自公共模块。"""
-    from minidb.core import errors
-
-    context["operation"] = operation
-    raise errors.DbError(errors.ErrorStage.STORAGE, getattr(errors, code), message, None, context)
+            error.add_note(f"目录扫描close失败：{cleanup}")

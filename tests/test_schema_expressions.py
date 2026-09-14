@@ -9,7 +9,7 @@ from itertools import product
 
 from minidb.core.expressions import ExprOp, resolve_result_type
 from minidb.core.errors import INVALID_ARGUMENT, DbError, ErrorStage
-from minidb.core.schema import ColumnDef, DataType, Schema
+from minidb.core.schema import ColumnDef, DataType, Schema, TypeSpec
 
 
 class SchemaTests(unittest.TestCase):
@@ -69,11 +69,20 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_invalid(lambda: ColumnDef(name, DataType.INT), "ColumnDef")
 
-    def test_column_type_rejects_bool_and_raw_strings(self) -> None:
-        """表列不能使用 BOOL，也不能拿字符串冒充 DataType 枚举。"""
-        for data_type in (DataType.BOOL, "INT", "VARCHAR", int, str, bool, True, None):
+    def test_column_type_rejects_raw_strings_and_python_types(self) -> None:
+        """v2允许BOOL列，但不允许字符串、Python类型或bool值冒充类型声明。"""
+        for data_type in ("INT", "VARCHAR", int, str, bool, True, None):
             with self.subTest(data_type=data_type):
                 self.assert_invalid(lambda: ColumnDef("age", data_type), "ColumnDef")
+
+    def test_v2_column_types_preserve_full_type_spec(self) -> None:
+        for spec in (TypeSpec(DataType.BOOL), TypeSpec(DataType.DATE),
+                     TypeSpec(DataType.DECIMAL, precision=6, scale=2)):
+            with self.subTest(spec=spec):
+                column = ColumnDef("value", spec)
+                self.assertEqual(column.type_spec, spec)
+                self.assertIs(column.data_type, spec.kind)
+                self.assertTrue(column.nullable)
 
     def test_column_count_boundaries(self) -> None:
         """Schema 接受 1 列和 64 列这两个合法边界。"""
@@ -118,19 +127,22 @@ class SchemaTests(unittest.TestCase):
 class ExpressionTypeTests(unittest.TestCase):
     """验证所有操作符和类型组合是否符合项目的唯一类型规则。"""
     def test_all_operator_and_type_combinations(self) -> None:
-        # 独立列出规范第 15.6 节允许的组合，覆盖 0—3 个操作数共 360 种输入。
         """枚举所有类型组合，对照独立列出的规则表验证结果。"""
-        integer_pair = (DataType.INT, DataType.INT)
-        string_pair = (DataType.VARCHAR, DataType.VARCHAR)
+        # v2第4.4节：数值交叉比较、字符串和日期排序、BOOL仅等于/不等于。
+        # 0—3个操作数共1404种组合；不通过调用生产比较函数生成预期结果。
+        ordered_pairs = (
+            (DataType.INT, DataType.INT), (DataType.INT, DataType.DECIMAL),
+            (DataType.DECIMAL, DataType.INT), (DataType.DECIMAL, DataType.DECIMAL),
+            (DataType.VARCHAR, DataType.VARCHAR), (DataType.DATE, DataType.DATE),
+        )
         bool_pair = (DataType.BOOL, DataType.BOOL)
         allowed = {
-            (ExprOp.EQ, integer_pair), (ExprOp.EQ, string_pair),
-            (ExprOp.NE, integer_pair), (ExprOp.NE, string_pair),
-            (ExprOp.LT, integer_pair), (ExprOp.LE, integer_pair),
-            (ExprOp.GT, integer_pair), (ExprOp.GE, integer_pair),
+            (ExprOp.EQ, bool_pair), (ExprOp.NE, bool_pair),
             (ExprOp.AND, bool_pair), (ExprOp.OR, bool_pair),
             (ExprOp.NOT, (DataType.BOOL,)),
         }
+        allowed.update((op, pair) for op in (ExprOp.EQ, ExprOp.NE, ExprOp.LT, ExprOp.LE, ExprOp.GT, ExprOp.GE)
+                       for pair in ordered_pairs)
         for op in ExprOp:
             for arity in range(4):
                 for operands in product(DataType, repeat=arity):
@@ -173,7 +185,7 @@ class ExpressionTypeTests(unittest.TestCase):
     def test_shared_enum_names_and_values_match_the_contract(self) -> None:
         """公共枚举的名字和值与工作计划保持一致。"""
         self.assertEqual({item.name: item.value for item in DataType}, {
-            "INT": "INT", "VARCHAR": "VARCHAR", "BOOL": "BOOL",
+            "INT": "INT", "VARCHAR": "VARCHAR", "BOOL": "BOOL", "DATE": "DATE", "DECIMAL": "DECIMAL",
         })
         self.assertEqual({item.name: item.value for item in ExprOp}, {
             name: name for name in ("EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR", "NOT")

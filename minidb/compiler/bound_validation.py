@@ -1,79 +1,128 @@
-"""张振：在消费 Bound 前检查类型、列索引及输出元数据。"""
-
-from minidb.compiler._checks import Check
+"""复核绑定树的类型、列号、NULL传播和位置；无存储副作用。"""
 from minidb.compiler.bound import (
-    BoundColumn, BoundCreate, BoundExpr,
-    BoundInsert, BoundLiteral, BoundSelect, BoundStatement, BoundUnary,
+    BoundColumn, BoundLiteral, BoundUnary, BoundBinary, BoundIsNull, BoundAssignment,
+    BoundCreate, BoundInsert, BoundSelect, BoundDelete, BoundUpdate, BoundCreateIndex,
+    BoundDescribe, BoundExplain,
 )
+from minidb.compiler._checks import Check
+from minidb.core.schema import DataType, TypeSpec
 from minidb.core.expressions import ExprOp, resolve_result_type
-from minidb.core.schema import DataType
+from minidb.core.value_rules import assignment_allowed
 
 
-def validate_expression(expr, table, check: Check, parent=None) -> None:
-    """使用显式栈遍历，所有分支都检查，不能按 AND/OR 的值短路。"""
-    # 每项是 (节点, 父范围, 是否离开节点)。离开时子节点已全部通过检查。
+def validate_expression(expr, table, check, parent=None):
     pending = [(expr, parent, False)]
-    active: set[int] = set()
-    # 只复用本次校验中已完全通过的节点，不能把某张表的结论带到下一次调用。
-    # 记录 id，避免数据类的递归比较/哈希再次遍历子树。
-    validated: set[int] = set()
+    active, done = set(), set()
     while pending:
         node, enclosing, leaving = pending.pop()
-        check.require(isinstance(node, BoundExpr), "predicate", "BoundExpr", type(node).__name__)
         if leaving:
-            # active 只记录当前祖先链，可以拒绝环，同时允许不同分支共享叶节点。
             active.remove(id(node))
-            operands = (node.operand,) if isinstance(node, BoundUnary) else (node.left, node.right)
-            result = resolve_result_type(node.op, tuple(child.data_type for child in operands))
-            check.require(result is DataType.BOOL and node.data_type is result, "predicate.data_type", "合法 BOOL 运算", repr(node.data_type))
-            validated.add(id(node))
+            if isinstance(node, BoundIsNull):
+                check.require(type(node.negated) is bool, "negated", "bool", node.negated)
+                check.require(node.operand.type_spec is not None, "operand.type_spec", "已定型操作数", None)
+            else:
+                children = (node.operand,) if isinstance(node, BoundUnary) else (node.left, node.right)
+                if any(child.type_spec is None for child in children):
+                    check.require(isinstance(node, BoundBinary) and node.op in
+                                  (ExprOp.EQ, ExprOp.NE, ExprOp.LT, ExprOp.LE, ExprOp.GT, ExprOp.GE)
+                                  and all(isinstance(child, BoundLiteral) and child.value is None
+                                          and child.type_spec is None for child in children),
+                                  "type_spec", "仅NULL与NULL比较保留未定型", node)
+                result = resolve_result_type(node.op, tuple(child.type_spec for child in children))
+                check.require(result is DataType.BOOL and node.type_spec == TypeSpec(DataType.BOOL),
+                              "data_type", "合法BOOL运算", node.type_spec)
+                check.require(type(node.nullable) is bool and node.nullable == any(child.nullable for child in children),
+                              "nullable", "与操作数NULL传播一致", node.nullable)
+            done.add(id(node))
             continue
-        check.require(id(node) not in active, "predicate", "无环表达式", type(node).__name__)
-        # 共享节点可能有不同父节点，每条父子关系都必须检查，不能被缓存跳过。
+        check.require(isinstance(node, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary, BoundIsNull)),
+                      "expression", "BoundExpr", type(node).__name__)
+        check.require(id(node) not in active, "expression", "无环", type(node).__name__)
         check.span(node.span, parent=enclosing)
-        if id(node) in validated:
-            # 共用同一子树的另一分支可复用结论；尚未完成的祖先节点不能走到这里。
+        if id(node) in done:
             continue
         if isinstance(node, BoundColumn):
-            check.require(type(node.index) is int and 0 <= node.index < len(table.schema.columns), "predicate.index", "扫描表中的有效列序号", node.index)
-            check.require(node.data_type is table.schema.columns[node.index].data_type, "predicate.data_type", "与扫描表列类型一致", repr(node.data_type))
+            check.require(type(node.index) is int and 0 <= node.index < len(table.schema.columns),
+                          "index", "表列号", node.index)
+            column = table.schema.columns[node.index]
+            check.require(node.type_spec == column.type_spec and type(node.nullable) is bool
+                          and node.nullable == column.nullable, "column", "表列类型及nullable", node)
         elif isinstance(node, BoundLiteral):
-            check.value(node.value, node.data_type, allow_bool=True)
+            check.value(node.value, node.type_spec)
         else:
-            allowed = node.op is ExprOp.NOT if isinstance(node, BoundUnary) else isinstance(node.op, ExprOp) and node.op is not ExprOp.NOT
-            check.require(allowed, "predicate.op", "节点对应的 ExprOp", repr(node.op))
             check.span(node.op_span, "op_span", node.span)
+            if isinstance(node, BoundUnary):
+                check.require(node.op is ExprOp.NOT, "op", "NOT", node.op)
+            elif isinstance(node, BoundBinary):
+                check.require(isinstance(node.op, ExprOp) and node.op is not ExprOp.NOT,
+                              "op", "二元ExprOp", node.op)
             active.add(id(node))
             pending.append((node, enclosing, True))
-            children = (node.operand,) if isinstance(node, BoundUnary) else (node.left, node.right)
-            # 栈先弹出最后放入的元素，倒序压栈才能保持从左到右的检查顺序。
+            children = (node.left, node.right) if isinstance(node, BoundBinary) else (node.operand,)
             pending.extend((child, node.span, False) for child in reversed(children))
             continue
-        # 列、字面量没有子节点，字段检查完成即可登记。
-        validated.add(id(node))
+        done.add(id(node))
 
 
-def validate_predicate(predicate, table, check: Check, parent=None) -> None:
-    """None 表示没有过滤条件；非空条件必须结构合法且最终类型为 BOOL。"""
-    if predicate is not None:
-        validate_expression(predicate, table, check, parent)
-        check.require(predicate.data_type is DataType.BOOL, "predicate", "BOOL", repr(predicate.data_type))
+def validate_predicate(predicate, table, check, parent=None):
+    if predicate is None:
+        return
+    validate_expression(predicate, table, check, parent)
+    check.require(predicate.type_spec == TypeSpec(DataType.BOOL),
+                  "predicate", "已按上下文绑定的BOOL或NULL", predicate.type_spec)
 
 
-def validate_bound(bound, *, plan: bool = False) -> None:
-    """检查整个已绑定语句，包括表、行、投影和条件，供 Semantic 与 Planner 共用。"""
-    check = Check("Planner.build" if plan else "Semantic.analyze", plan=plan)
-    check.require(isinstance(bound, BoundStatement), "bound", "BoundStatement", type(bound).__name__)
+def validate_assignments(assignments, table, check, parent):
+    check.require(type(assignments) is tuple and bool(assignments), "assignments", "非空tuple", assignments)
+    seen = set()
+    for assignment in assignments:
+        check.require(isinstance(assignment, BoundAssignment), "assignment", "BoundAssignment", type(assignment).__name__)
+        index = assignment.column_index
+        check.require(type(index) is int and 0 <= index < len(table.schema.columns)
+                      and index not in seen, "column_index", "不重复的有效列号", index)
+        seen.add(index)
+        check.span(assignment.span, parent=parent)
+        check.require(isinstance(assignment.value, (BoundColumn, BoundLiteral)),
+                      "assignment.value", "列引用或常量", type(assignment.value).__name__)
+        validate_expression(assignment.value, table, check, assignment.span)
+        target = table.schema.columns[index]
+        check.require(assignment_allowed(assignment.value.type_spec, target.type_spec),
+                      "assignment.type_spec", "可赋值类型", assignment.value.type_spec)
+        if isinstance(assignment.value, BoundLiteral):
+            check.value(assignment.value.value, target.type_spec, nullable=target.nullable)
+
+
+def validate_index_target(name, table, column_index, unique, check):
+    check.name(name)
+    check.table(table)
+    check.require(type(column_index) is int and 0 <= column_index < len(table.schema.columns),
+                  "column_index", "有效列号", column_index)
+    check.require(type(unique) is bool, "unique", "bool", unique)
+
+
+def validate_bound(bound, *, plan=False):
+    check = Check("validate_bound", plan=plan)
+    kinds = (BoundCreate, BoundInsert, BoundSelect, BoundDelete, BoundUpdate,
+             BoundCreateIndex, BoundDescribe, BoundExplain)
+    check.require(isinstance(bound, kinds), "bound", "完整BoundStatement", type(bound).__name__)
     check.span(bound.span)
-    if isinstance(bound, BoundCreate):
+    if isinstance(bound, BoundExplain):
+        check.require(isinstance(bound.statement, (BoundInsert, BoundSelect, BoundDelete, BoundUpdate)),
+                      "statement", "可EXPLAIN的非DDL语句", type(bound.statement).__name__)
+        check.span(bound.statement.span, parent=bound.span)
+        validate_bound(bound.statement, plan=plan)
+    elif isinstance(bound, BoundCreate):
         check.name(bound.table_name)
         check.schema(bound.schema)
-        return
-    check.table(bound.table)
-    if isinstance(bound, BoundInsert):
-        check.row(bound.row, bound.table.schema)
     else:
-        if isinstance(bound, BoundSelect):
-            check.projection(bound.table, bound.projection, bound.output_columns)
-        # SELECT 与 DELETE 共用同一套条件及位置检查。
-        validate_predicate(bound.predicate, bound.table, check, bound.span)
+        check.table(bound.table)
+        if isinstance(bound, BoundInsert):
+            check.row(bound.row, bound.table.schema)
+        elif isinstance(bound, BoundCreateIndex):
+            validate_index_target(bound.name, bound.table, bound.column_index, bound.unique, check)
+        elif isinstance(bound, (BoundSelect, BoundDelete, BoundUpdate)):
+            if isinstance(bound, BoundSelect):
+                check.projection(bound.table, bound.projection, bound.output_columns)
+            if isinstance(bound, BoundUpdate):
+                validate_assignments(bound.assignments, bound.table, check, bound.span)
+            validate_predicate(bound.predicate, bound.table, check, bound.span)
