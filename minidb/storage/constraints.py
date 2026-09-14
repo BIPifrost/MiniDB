@@ -9,8 +9,8 @@
     返回IndexKeyCodec规范键负载字节数，不包含行前缀；不能改用整行RowCodec。
   lookup.probe(index: IndexDef, key) -> Iterator[RowId]
     由同一会话的IndexManager实现，不能伪造空命中绕过约束。
-ValidatedWriteToken、ValidatedInsert、ValidatedUpdate的唯一源文件为本模块。
-公共RowUpdate/UpdateBatch仍从core.records导入；其v2 Value支持待原负责人提供。
+ValidatedWriteToken 的唯一源文件是 core.records；本模块只负责通过私有工厂签发，
+不再维护第二个同名类型。ValidatedInsert/ValidatedUpdate仍由本模块定义。
 """
 from dataclasses import dataclass
 from collections.abc import Iterator
@@ -19,31 +19,22 @@ from uuid import UUID
 
 from minidb.core._v2_contract import fail, require_method
 from minidb.core.errors import DbError
-from minidb.core.records import RowId, RowUpdate, UpdateBatch
+from minidb.core.records import (
+    RowId,
+    RowUpdate,
+    UpdateBatch,
+    ValidatedWriteToken,
+    _issue_validated_write_token,
+)
 from minidb.core.schema import TableDef, Schema, IndexDef, IndexOrigin, PendingIndexDef
 from minidb.core.value_rules import normalize_value
 
 _MAX_ROWS = 10000
 _MAX_BYTES = 16 * 1024 * 1024
-_TOKEN_AUTHORITY = object()
 
 
 class ConstraintLookup(Protocol):
     def probe(self, index: IndexDef, key: object) -> Iterator[RowId]: ...
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class ValidatedWriteToken:
-    session_id: UUID
-    catalog_generation: int
-    prepared_id: UUID
-
-    def __init__(self, session_id, catalog_generation, prepared_id, *, _authority=None):
-        if _authority is not _TOKEN_AUTHORITY:
-            raise TypeError("写入令牌只能由Session持有的ConstraintValidator工厂签发")
-        object.__setattr__(self, "session_id", session_id)
-        object.__setattr__(self, "catalog_generation", catalog_generation)
-        object.__setattr__(self, "prepared_id", prepared_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +109,7 @@ class ConstraintValidator:
         # 校验期间目录如果被调用方更换，不能给旧候选签发新代际token。
         if self._catalog.generation != binding[1] or self._session.session_id != binding[0]:
             fail("INVALID_ARGUMENT", "约束验证期间会话/目录已变化")
-        token = ValidatedWriteToken(*binding, _authority=_TOKEN_AUTHORITY)
+        token = _issue_validated_write_token(*binding)
         self._session.register_validated_token(token)
         return token
 

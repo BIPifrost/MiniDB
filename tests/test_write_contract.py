@@ -2,7 +2,6 @@ import unittest
 from dataclasses import FrozenInstanceError
 from uuid import uuid4
 
-from fixtures.contracts import STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.core.records import (
     RowId,
     RowUpdate,
@@ -11,8 +10,32 @@ from minidb.core.records import (
     WriteKind,
     _issue_validated_write_token,
 )
+from minidb.core.schema import (
+    ColumnDef,
+    DataType,
+    IndexDef,
+    IndexOrigin,
+    PendingIndexDef,
+    Schema,
+    TableDef,
+    TableRef,
+    TypeSpec,
+)
 from minidb.core.source import SourcePos, SourceSpan
 from minidb.engine.write_contract import PreparedWrite, validate_prepared
+from minidb.storage.constraints import ValidatedWriteToken as ValidatorToken
+
+
+STUDENT_SCHEMA = Schema((
+    ColumnDef("id", TypeSpec(DataType.INT)),
+    ColumnDef("name", TypeSpec(DataType.VARCHAR, length=64)),
+    ColumnDef("age", TypeSpec(DataType.INT)),
+))
+STUDENT_TABLE = TableDef(TableRef(1, "student", 3), STUDENT_SCHEMA)
+STUDENT_INDEX = IndexDef(1, "ix_student_id", 1, 0, 4, False, IndexOrigin.USER)
+PENDING_STUDENT_INDEX = PendingIndexDef(
+    "ix_student_id", 0, False, IndexOrigin.USER
+)
 
 
 class WriteContractTests(unittest.TestCase):
@@ -53,6 +76,7 @@ class WriteContractTests(unittest.TestCase):
         return PreparedWrite(**fields)
 
     def test_token_public_construction_is_rejected(self):
+        self.assertIs(ValidatorToken, ValidatedWriteToken)
         with self.assertRaises(TypeError):
             ValidatedWriteToken(self.session_id, 3, self.prepared_id)
         with self.assertRaises(TypeError):
@@ -85,23 +109,26 @@ class WriteContractTests(unittest.TestCase):
             self._prepared(
                 WriteKind.CREATE_INDEX,
                 table=STUDENT_TABLE,
-                create_indexes=(object(),),
+                create_indexes=(PENDING_STUDENT_INDEX,),
                 create_index_entries=((1, row_id),),
             ),
             self._prepared(
                 WriteKind.INSERT,
                 table=STUDENT_TABLE,
                 insert_row=(1, "Alice", 20),
+                affected_indexes=(STUDENT_INDEX,),
             ),
             self._prepared(
                 WriteKind.UPDATE,
                 table=STUDENT_TABLE,
                 updates=(update,),
+                affected_indexes=(STUDENT_INDEX,),
             ),
             self._prepared(
                 WriteKind.DELETE,
                 table=STUDENT_TABLE,
                 deletes=(old,),
+                affected_indexes=(STUDENT_INDEX,),
             ),
         )
         self.assertEqual(tuple(item.kind for item in cases), tuple(WriteKind))
@@ -156,6 +183,21 @@ class WriteContractTests(unittest.TestCase):
                 WriteKind.DELETE,
                 table=STUDENT_TABLE,
                 deletes=(old, old),
+            )
+
+    def test_index_fields_require_the_formal_catalog_types(self):
+        with self.assertRaisesRegex(TypeError, "create_indexes"):
+            self._prepared(
+                WriteKind.CREATE_INDEX,
+                table=STUDENT_TABLE,
+                create_indexes=(object(),),
+            )
+        with self.assertRaisesRegex(TypeError, "affected_indexes"):
+            self._prepared(
+                WriteKind.INSERT,
+                table=STUDENT_TABLE,
+                insert_row=(1, "Alice", 20),
+                affected_indexes=(object(),),
             )
 
 

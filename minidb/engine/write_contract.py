@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 from uuid import UUID
 
 from minidb.core.records import (
@@ -16,23 +15,16 @@ from minidb.core.records import (
     WriteKind,
     _validate_row,
 )
-from minidb.core.schema import Schema, TableDef
+from minidb.core.schema import IndexDef, PendingIndexDef, Schema, TableDef
 from minidb.core.source import SourceSpan
-
-if TYPE_CHECKING:
-    # These names are owned by the catalog/schema contributor. Keeping them as
-    # forward references avoids creating competing production definitions.
-    from minidb.core.schema import IndexDef, PendingIndexDef
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedWrite:
     """Fully prepared, immutable input for one ACTIVE write application.
 
-    Handoff note: this is the single WIP contract definition. IndexDef and
-    PendingIndexDef are intentionally forward references until Catalog's
-    owner lands the formal classes. Do not replace them with a second local
-    production type; update the shared imports and validation together.
+    Catalog owns the IndexDef/PendingIndexDef rules. This module imports those
+    formal shared types and only validates their placement in a prepared write.
     """
 
     prepared_id: UUID
@@ -97,6 +89,14 @@ def validate_prepared(prepared: PreparedWrite) -> None:
     ):
         if type(getattr(prepared, name)) is not tuple:
             raise TypeError(f"{name} must be a tuple")
+    if any(
+        not isinstance(item, PendingIndexDef) for item in prepared.create_indexes
+    ):
+        raise TypeError("create_indexes must contain only PendingIndexDef values")
+    if any(
+        not isinstance(item, IndexDef) for item in prepared.affected_indexes
+    ):
+        raise TypeError("affected_indexes must contain only IndexDef values")
     if any(not isinstance(item, RowUpdate) for item in prepared.updates):
         raise TypeError("updates must contain only RowUpdate values")
     if any(not isinstance(item, StoredRow) for item in prepared.deletes):
@@ -137,9 +137,6 @@ def _validate_index_entries(entries: tuple[tuple[Value, RowId], ...]) -> None:
 
 
 def _validate_kind_fields(prepared: PreparedWrite) -> None:
-    # Actual IndexDef/PendingIndexDef class checks stay deferred until the
-    # shared catalog definitions land. The object-shape test here prevents
-    # silently creating another competing catalog type in this module.
     has_table = prepared.table is not None
     has_create = prepared.create_name is not None or prepared.create_schema is not None
     has_insert = prepared.insert_row is not None
@@ -197,6 +194,22 @@ def _validate_kind_fields(prepared: PreparedWrite) -> None:
         )
     if not valid:
         raise ValueError(f"fields are inconsistent with WriteKind.{prepared.kind.name}")
+
+    schema = (
+        prepared.create_schema
+        if prepared.kind is WriteKind.CREATE_TABLE
+        else (prepared.table.schema if prepared.table is not None else None)
+    )
+    if schema is not None and any(
+        index.column_index >= len(schema.columns) for index in prepared.create_indexes
+    ):
+        raise ValueError("create_indexes must reference a column in the target schema")
+    if prepared.table is not None and any(
+        index.table_id != prepared.table.ref.table_id
+        or index.column_index >= len(prepared.table.schema.columns)
+        for index in prepared.affected_indexes
+    ):
+        raise ValueError("affected_indexes must belong to the target table")
 
 
 __all__ = ["PreparedWrite", "validate_prepared"]
