@@ -253,6 +253,34 @@ class StorageEngineV2Tests(unittest.TestCase):
         )
         self.assertEqual(self.pool.stats(), stats_before)
 
+    def test_external_index_cursor_joins_storage_scan_barrier(self):
+        table = self._create_wide_table()
+
+        class Cursor:
+            def __init__(cursor_self):
+                cursor_self.closed = False
+
+            def close(cursor_self):
+                if cursor_self.closed:
+                    return
+                cursor_self.closed = True
+                self.storage.unregister_external_scan(cursor_self)
+
+        cursor = Cursor()
+        self.storage.register_external_scan(cursor)
+        self.assertEqual(self.storage.active_scan_count, 1)
+        stats_before = self.pool.stats()
+        self.assert_code(
+            errors.ACTIVE_SCAN,
+            lambda: self.storage.insert_row(
+                table, (1, "a", "b", "c"), self._token()
+            ),
+        )
+        self.assertEqual(self.pool.stats(), stats_before)
+        self.storage.close_scans()
+        self.assertTrue(cursor.closed)
+        self.assertEqual(self.storage.active_scan_count, 0)
+
     def test_token_identity_session_and_catalog_generation_are_rechecked(self):
         table = self._create_wide_table()
         row = (1, "a", "b", "c")

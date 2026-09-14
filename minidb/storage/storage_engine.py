@@ -224,13 +224,33 @@ class StorageEngine:
         self._catalog_generation = None
         self._token_is_authorized = None
         self._active_scans: set[_PageRowScan] = set()
+        # IndexManager registers its closeable cursors here so the transaction
+        # coordinator sees one combined active-scan count before begin/commit.
+        self._external_scans: set[object] = set()
         self._closed = False
         self._failed = False
 
     @property
     def active_scan_count(self) -> int:
         """返回当前尚未关闭的扫描数，供生命周期检查和诊断使用。"""
-        return len(self._active_scans)
+        return len(self._active_scans) + len(self._external_scans)
+
+    def register_external_scan(self, scan: object) -> None:
+        """Register a Session-owned index cursor in the shared scan barrier."""
+        self._require_open("register_external_scan")
+        close = getattr(scan, "close", None)
+        if not callable(close) or scan in self._external_scans:
+            _error(
+                errors.INVALID_ARGUMENT,
+                "外部扫描必须可关闭且不能重复登记",
+                "register_external_scan",
+                resource=type(scan).__name__,
+            )
+        self._external_scans.add(scan)
+
+    def unregister_external_scan(self, scan: object) -> None:
+        """Remove an index cursor; repeated cursor close remains harmless."""
+        self._external_scans.discard(scan)
 
     @property
     def buffer_pool(self) -> _BufferPoolLike:
@@ -921,6 +941,8 @@ class StorageEngine:
         """关闭全部扫描；TransactionManager 可安全重复调用。"""
         for scan in tuple(self._active_scans):
             scan.close()
+        for scan in tuple(self._external_scans):
+            scan.close()
 
     def abort_resources(self) -> None:
         """停止 StorageEngine 并关闭扫描，但不刷新或关闭 FileManager。"""
@@ -1175,12 +1197,12 @@ class StorageEngine:
             )
 
     def _require_no_scans(self, operation: str) -> None:
-        if self._active_scans:
+        if self.active_scan_count:
             _error(
                 errors.ACTIVE_SCAN,
                 "存在活动扫描时不能修改或正常关闭存储",
                 operation,
-                active_scan_count=len(self._active_scans),
+                active_scan_count=self.active_scan_count,
             )
 
     def _require_mutable(

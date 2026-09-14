@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 # Catalog 或 Storage 模块的额外初始化，也可以减少不必要的循环导入。
 if TYPE_CHECKING:
     from minidb.catalog.catalog_manager import CatalogManager
+    from minidb.storage.index_manager import IndexManager
     from minidb.storage.storage_engine import StorageEngine
 
 
@@ -26,3 +27,4 @@ class ExecutionContext:
 
     catalog: "CatalogManager"
     storage: "StorageEngine"
+    index_manager: "IndexManager | None" = None

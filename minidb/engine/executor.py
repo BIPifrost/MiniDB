@@ -8,6 +8,7 @@ from minidb.compiler.plan import (
     CreateTablePlan,
     DeletePlan,
     FilterPlan,
+    IndexScanPlan,
     InsertPlan,
     Plan,
     ProjectPlan,
@@ -15,10 +16,11 @@ from minidb.compiler.plan import (
     UpdatePlan,
     validate_plan,
 )
+from minidb.core import errors
 from minidb.core.errors import DbError, ErrorStage, TABLE_EXISTS
 from minidb.core.records import RowUpdate, UpdateBatch
 from minidb.core.result import ExecRecord, QueryResult, ResultCursor
-from minidb.core.schema import TableDef, TableRef
+from minidb.core.schema import IndexBounds, TableDef, TableRef
 
 from . import expression_eval
 from .context import ExecutionContext
@@ -100,12 +102,69 @@ class Executor:
             if callable(close):
                 close()
 
+    def _execute_index_scan(
+        self, plan: IndexScanPlan, context: ExecutionContext
+    ) -> Iterator[ExecRecord]:
+        """Resolve index RowIds back to current table rows and verify the key."""
+        if context.index_manager is None:
+            raise RuntimeError("IndexScanPlan requires ExecutionContext.index_manager")
+        bounds = IndexBounds(
+            plan.has_lower,
+            plan.lower.value if plan.lower is not None else None,
+            plan.lower_inclusive,
+            plan.has_upper,
+            plan.upper.value if plan.upper is not None else None,
+            plan.upper_inclusive,
+            plan.null_only,
+        )
+        cursor = context.index_manager.search(plan.index, bounds)
+        try:
+            for row_id in cursor:
+                try:
+                    stored = context.storage.fetch_row(plan.table, row_id)
+                except DbError as error:
+                    if error.code not in (
+                        errors.STALE_ROW,
+                        errors.SLOT_ID_INVALID,
+                        errors.PAGE_CORRUPTED,
+                    ):
+                        raise
+                    raise DbError(
+                        ErrorStage.STORAGE,
+                        errors.INDEX_CORRUPTED,
+                        "索引项指向不存在或无效的表记录",
+                        plan.span,
+                        {
+                            "index_name": plan.index.name,
+                            "row_id": repr(row_id),
+                            "cause": error.code,
+                        },
+                    ) from error
+                if stored.values[plan.index.column_index] != cursor.current_value:
+                    raise DbError(
+                        ErrorStage.STORAGE,
+                        errors.INDEX_CORRUPTED,
+                        "索引键与当前表记录不一致",
+                        plan.span,
+                        {
+                            "index_name": plan.index.name,
+                            "row_id": repr(row_id),
+                        },
+                    )
+                yield ExecRecord(stored.values, stored.row_id)
+        finally:
+            cursor.close()
+
     def _execute_stream(
-        self, plan: SeqScanPlan | FilterPlan, context: ExecutionContext
+        self,
+        plan: SeqScanPlan | IndexScanPlan | FilterPlan,
+        context: ExecutionContext,
     ) -> Iterator[ExecRecord]:
         """内部节点传递带 RowId 的记录，避免过早转成最终查询结果。"""
         if isinstance(plan, SeqScanPlan):
             return self._execute_seq_scan(plan, context)
+        if isinstance(plan, IndexScanPlan):
+            return self._execute_index_scan(plan, context)
         if isinstance(plan, FilterPlan):
             return self._execute_filter(plan, context)
         raise TypeError(f"unsupported stream type: {type(plan).__name__}")
