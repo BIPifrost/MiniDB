@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from .records import Row, RowId, _validate_row
 
@@ -69,3 +70,101 @@ class QueryResult:
                 raise ValueError("affected_rows must be non-negative")
         if not isinstance(self.message, str):
             raise TypeError("message must be a string")
+
+
+class ResultCursor:
+    """Closeable, single-pass stream of validated result rows.
+
+    Handoff note: Executor can open this cursor today. Session.iter_results
+    and CLI integration are still pending; callers must explicitly exhaust
+    or close it before starting another statement or closing the database.
+    """
+
+    __slots__ = ("_columns", "_rows", "_close", "_closed")
+
+    def __init__(
+        self,
+        columns: tuple[ResultColumn, ...],
+        rows: Iterator[Row],
+        *,
+        close: Callable[[], None] | None = None,
+    ) -> None:
+        if type(columns) is not tuple:
+            raise TypeError("columns must be a tuple")
+        if any(not isinstance(column, ResultColumn) for column in columns):
+            raise TypeError("columns must contain only ResultColumn values")
+        if not hasattr(rows, "__next__"):
+            raise TypeError("rows must be an iterator")
+        if close is not None and not callable(close):
+            raise TypeError("close must be callable or None")
+        self._columns = columns
+        self._rows = rows
+        self._close = close
+        self._closed = False
+
+    @property
+    def columns(self) -> tuple[ResultColumn, ...]:
+        return self._columns
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def __iter__(self) -> "ResultCursor":
+        return self
+
+    def __next__(self) -> Row:
+        if self._closed:
+            raise StopIteration
+        try:
+            row = next(self._rows)
+            _validate_row(row, field_name="result row")
+            if len(row) != len(self.columns):
+                raise ValueError("each result row must match the column count")
+            return row
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                error.add_note(f"closing result cursor also failed: {cleanup_error}")
+            raise
+
+    def close(self) -> None:
+        """Close the row source and optional owner; repeated calls do nothing."""
+        if self._closed:
+            return
+        self._closed = True
+        first_error: BaseException | None = None
+        row_close = getattr(self._rows, "close", None)
+        if callable(row_close):
+            try:
+                row_close()
+            except BaseException as error:
+                first_error = error
+        if self._close is not None:
+            try:
+                self._close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+                else:
+                    first_error.add_note(f"closing cursor owner also failed: {error}")
+        if first_error is not None:
+            raise first_error
+
+
+CommandResult = QueryResult
+StatementResult: TypeAlias = QueryResult | ResultCursor
+
+
+__all__ = [
+    "CommandResult",
+    "ExecRecord",
+    "QueryResult",
+    "ResultColumn",
+    "ResultCursor",
+    "StatementResult",
+]

@@ -13,7 +13,12 @@ from fakes.in_memory_storage_engine import InMemoryStorageEngine
 from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE
 from minidb.catalog.catalog_manager import CatalogManager
-from minidb.compiler.bound import BoundBinary, BoundColumn, BoundLiteral
+from minidb.compiler.bound import (
+    BoundAssignment,
+    BoundBinary,
+    BoundColumn,
+    BoundLiteral,
+)
 from minidb.compiler.plan import (
     CreateTablePlan,
     DeletePlan,
@@ -21,6 +26,7 @@ from minidb.compiler.plan import (
     InsertPlan,
     ProjectPlan,
     SeqScanPlan,
+    UpdatePlan,
 )
 from minidb.core.expressions import ExprOp
 from minidb.core.errors import DbError, ErrorStage, INVALID_PLAN, TABLE_EXISTS
@@ -86,6 +92,90 @@ class ExecutorIntegrationTests(unittest.TestCase):
         self.assertIsNone(result.affected_rows)
         self.assertEqual(self.storage.active_scan_count, 0)
         self.assertEqual(self.storage.sync_count, 0)
+
+    def test_execute_read_is_lazy_and_explicit_close_releases_scan(self):
+        self._insert_students()
+        with patch.object(
+            self.storage,
+            "scan_rows",
+            wraps=self.storage.scan_rows,
+        ) as scan_rows:
+            cursor = self.executor.execute_read(self._project((1,)), self.context)
+            scan_rows.assert_not_called()
+            self.assertEqual(self.storage.active_scan_count, 0)
+
+            self.assertEqual(next(cursor), ("Alice",))
+            scan_rows.assert_called_once_with(self.table)
+            self.assertEqual(self.storage.active_scan_count, 1)
+
+            cursor.close()
+            self.assertTrue(cursor.closed)
+            self.assertEqual(self.storage.active_scan_count, 0)
+            with self.assertRaises(StopIteration):
+                next(cursor)
+
+    def test_execute_read_exhaustion_closes_scan(self):
+        self._insert_students()
+        cursor = self.executor.execute_read(self._project((1,)), self.context)
+        self.assertEqual(list(cursor), [("Alice",), ("Bob",)])
+        self.assertTrue(cursor.closed)
+        self.assertEqual(self.storage.active_scan_count, 0)
+
+    def test_update_candidates_use_one_old_row_and_close_the_scan(self):
+        self._insert_students()
+        plan = UpdatePlan(
+            self.table,
+            SeqScanPlan(self.table, self.span),
+            (
+                BoundAssignment(
+                    0, BoundColumn(2, DataType.INT, self.span), self.span
+                ),
+                BoundAssignment(
+                    2, BoundColumn(0, DataType.INT, self.span), self.span
+                ),
+            ),
+            self.span,
+        )
+
+        batch = self.executor._collect_update_batch(plan, self.context)
+
+        self.assertEqual(
+            tuple(
+                (item.expected_old, item.new_row)
+                for item in batch.items
+            ),
+            (
+                ((1, "Alice", 20), (20, "Alice", 1)),
+                ((2, "Bob", 17), (17, "Bob", 2)),
+            ),
+        )
+        self.assertEqual(self.storage.active_scan_count, 0)
+        self.assertEqual(
+            [record.values for record in self.storage.scan_rows(self.table)],
+            [(1, "Alice", 20), (2, "Bob", 17)],
+        )
+
+    def test_update_candidate_failure_closes_scan_without_writes(self):
+        self._insert_students()
+        assignment = BoundAssignment(
+            1, BoundLiteral("changed", DataType.VARCHAR, self.span), self.span
+        )
+        plan = UpdatePlan(
+            self.table,
+            SeqScanPlan(self.table, self.span),
+            (assignment,),
+            self.span,
+        )
+        failure = RuntimeError("evaluation failed")
+        with patch.object(expression_eval, "evaluate", side_effect=failure):
+            with self.assertRaises(RuntimeError) as raised:
+                self.executor._collect_update_batch(plan, self.context)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.storage.active_scan_count, 0)
+        self.assertEqual(
+            [record.values for record in self.storage.scan_rows(self.table)],
+            [(1, "Alice", 20), (2, "Bob", 17)],
+        )
 
     def test_create_passes_complete_table_to_existing_catalog(self):
         """建表接通表号、根页、真实 RowCodec 预检和目录行写入。"""

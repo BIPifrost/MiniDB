@@ -1,7 +1,15 @@
 import unittest
+from datetime import date, datetime
+from decimal import Decimal
 
 from minidb.core.records import RowId, RowScan, RowSlot, StoredRow
-from minidb.core.result import ExecRecord, QueryResult, ResultColumn
+from minidb.core.result import (
+    CommandResult,
+    ExecRecord,
+    QueryResult,
+    ResultColumn,
+    ResultCursor,
+)
 from minidb.engine.context import ExecutionContext
 from minidb.storage.storage_engine import StorageEngine
 from minidb.storage.data_page import DataPageHeader, RecordSlot, SlotState
@@ -60,6 +68,43 @@ class ExecutionTypeTests(unittest.TestCase):
     def test_query_result_rejects_inconsistent_row_width(self):
         with self.assertRaises(ValueError):
             QueryResult([ResultColumn("id", "INT")], [(1, "extra")])
+
+    def test_row_contract_accepts_all_v2_value_types(self):
+        values = (1, "Alice", True, date(2026, 9, 14), Decimal("1.20"), None)
+        self.assertEqual(ExecRecord(values, None).values, values)
+        with self.assertRaises(TypeError):
+            ExecRecord((datetime(2026, 9, 14, 12, 0),), None)
+
+    def test_result_cursor_validates_rows_and_closes_on_exhaustion(self):
+        events = []
+        rows = iter(((1,), (2,)))
+        cursor = ResultCursor(
+            (ResultColumn("id", "INT"),), rows, close=lambda: events.append("close")
+        )
+
+        self.assertIs(iter(cursor), cursor)
+        self.assertEqual(list(cursor), [(1,), (2,)])
+        self.assertTrue(cursor.closed)
+        self.assertEqual(events, ["close"])
+        with self.assertRaises(AttributeError):
+            cursor.columns = ()
+        cursor.close()
+        self.assertEqual(events, ["close"])
+
+    def test_result_cursor_closes_after_invalid_row(self):
+        events = []
+        cursor = ResultCursor(
+            (ResultColumn("id", "INT"),),
+            iter(((1, "extra"),)),
+            close=lambda: events.append("close"),
+        )
+        with self.assertRaises(ValueError):
+            next(cursor)
+        self.assertTrue(cursor.closed)
+        self.assertEqual(events, ["close"])
+
+    def test_command_result_is_query_result_compatibility_alias(self):
+        self.assertIs(CommandResult, QueryResult)
 
     def test_execution_context_uses_the_agreed_field_names(self):
         catalog = object()
