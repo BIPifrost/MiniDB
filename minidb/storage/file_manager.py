@@ -83,6 +83,15 @@ class FileManager:
             raise
 
     @classmethod
+    def create_v2(cls, path: str):
+        """创建并发布完整 v2 空库，返回 UUID；随后按已有库 open_locked。
+
+        返回时不持锁，不返回尚未初始化的 FileManager。目录页只初始化一次。
+        """
+        from minidb.storage.database_creation import create_v2_database
+        return create_v2_database(path)
+
+    @classmethod
     def open_locked(cls, path: str, lock_handle: DatabaseLock, *,
                     guard: TransactionGuard | None = None) -> 'FileManager':
         """在调用方已有的锁上打开 v2；不新建、不重开、不原地升级。
