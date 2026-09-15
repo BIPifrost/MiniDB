@@ -2,6 +2,7 @@
 
 import random
 import unittest
+from uuid import uuid4
 
 from minidb.core import errors
 from minidb.compiler.bound import BoundLiteral
@@ -26,6 +27,8 @@ from minidb.engine.context import ExecutionContext
 from minidb.engine.executor import Executor
 from minidb.storage.index_manager import IndexManager
 from minidb.storage.index_page import IndexKeyCodec, IndexPage, IndexPageType
+from minidb.storage.constraints import ConstraintValidator
+from minidb.storage.row_codec import RowCodec
 
 
 class MemoryPages:
@@ -96,6 +99,13 @@ class FakeCatalog:
         self._storage = storage
         self.tables = tables
         self.indexes = ()
+        self.generation = 0
+
+    def find_table(self, name):
+        return next(
+            (table for table in self.tables.values() if table.ref.name == name),
+            None,
+        )
 
     def list_tables(self):
         return list(self.tables.values())
@@ -156,6 +166,38 @@ class IndexManagerTests(unittest.TestCase):
         self.assertEqual((report.page_count, report.leaf_count, report.entry_count, report.height),
                          (2, 1, 0, 1))
         self.assertEqual(self.search(bounds()), [])
+
+    def test_constraint_key_size_adapter_uses_formal_index_encoding(self):
+        varchar = TypeSpec(DataType.VARCHAR, length=1024)
+        integer = TypeSpec(DataType.INT)
+        self.assertEqual(self.manager.encoded_size(None, varchar), 0)
+        self.assertEqual(self.manager.encoded_size("中", varchar), 3)
+        self.assertEqual(self.manager.encoded_size(1, integer), 8)
+        with self.assertRaises(errors.DbError) as caught:
+            self.manager.encoded_size("x" * 513, varchar)
+        self.assertEqual(caught.exception.code, errors.INDEX_KEY_TOO_LARGE)
+
+    def test_constraint_validator_accepts_index_manager_as_key_codec(self):
+        class TokenSession:
+            def __init__(self):
+                self.session_id = uuid4()
+                self.tokens = []
+
+            def register_validated_token(self, token):
+                self.tokens.append(token)
+
+        session = TokenSession()
+        self.catalog.indexes = (self.index,)
+        validator = ConstraintValidator(
+            session, self.catalog, RowCodec(), self.manager
+        )
+
+        validated = validator.validate_insert(
+            self.table, self.manager, ("中",), uuid4()
+        )
+
+        self.assertEqual(validated.row, ("中",))
+        self.assertEqual(session.tokens, [validated.token])
 
     def test_create_requires_prepared_sorted_unique_entries_without_writing(self):
         before = dict(self.pages.pages)

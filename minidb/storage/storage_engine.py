@@ -587,6 +587,25 @@ class StorageEngine:
             slot_id=row_id.slot_id,
         )
 
+    def encoded_size(self, table: TableDef, row: Row) -> int:
+        """Return the RowCodec size used by prepare-time write accounting.
+
+        This is deliberately a read-only StorageEngine boundary: Executor and
+        ConstraintValidator may ask for the size, but neither may reach into
+        the private codec or duplicate its format rules.
+        """
+        self._require_open("encoded_size")
+        formal = _validate_table(table, "encoded_size")
+        size = self._codec.encoded_size(row, formal.schema)
+        if type(size) is not int or size < 0:
+            _error(
+                errors.ROW_ENCODING_ERROR,
+                "RowCodec 返回了无效的编码长度",
+                "encoded_size",
+                encoded_size=repr(size),
+            )
+        return size
+
     def delete_row(self, table: TableDef, row_id: RowId) -> bool:
         """确认 RowId 位于目标表页链后，将有效槽标记为删除。"""
         self._require_mutable("delete_row", TransactionState.ACTIVE)

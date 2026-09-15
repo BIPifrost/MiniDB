@@ -191,6 +191,17 @@ class IndexManager:
     def guard(self) -> TransactionGuard:
         return self._guard
 
+    def encoded_size(self, value: object, type_spec) -> int:
+        """Return the canonical index-key payload size for validation.
+
+        ConstraintValidator accepts one shared key-codec dependency whose
+        method takes ``(value, type_spec)``. Persistent trees bind one
+        ``IndexKeyCodec`` to each index instead, so this adapter creates that
+        formal codec and reports its payload size without copying key rules.
+        """
+        _, payload = IndexKeyCodec(type_spec).encode(value)
+        return len(payload)
+
     def reserve_anchor(self) -> int:
         """Reserve the stable page id stored in IndexDef before tree creation."""
         self._require_write("IndexManager.reserve_anchor")

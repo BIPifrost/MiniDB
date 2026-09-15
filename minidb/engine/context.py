@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 # 类型只用于静态检查，运行时不导入具体模块，避免仅导入 context 就触发
 # Catalog 或 Storage 模块的额外初始化，也可以减少不必要的循环导入。
 if TYPE_CHECKING:
     from minidb.catalog.catalog_manager import CatalogManager
+    from minidb.storage.constraints import ConstraintValidator
     from minidb.storage.index_manager import IndexManager
     from minidb.storage.storage_engine import StorageEngine
 
@@ -28,3 +30,5 @@ class ExecutionContext:
     catalog: "CatalogManager"
     storage: "StorageEngine"
     index_manager: "IndexManager | None" = None
+    constraint_validator: "ConstraintValidator | None" = None
+    session_id: UUID | None = None

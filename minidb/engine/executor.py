@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from uuid import UUID, uuid4
 
 from minidb.compiler.plan import (
     CreateTablePlan,
@@ -18,12 +19,13 @@ from minidb.compiler.plan import (
 )
 from minidb.core import errors
 from minidb.core.errors import DbError, ErrorStage, TABLE_EXISTS
-from minidb.core.records import RowUpdate, UpdateBatch
+from minidb.core.records import RowMovement, RowUpdate, UpdateBatch, WriteKind
 from minidb.core.result import ExecRecord, QueryResult, ResultCursor
 from minidb.core.schema import IndexBounds, TableDef, TableRef
 
 from . import expression_eval
 from .context import ExecutionContext
+from .write_contract import PreparedWrite
 
 
 class Executor:
@@ -42,6 +44,102 @@ class Executor:
         if isinstance(plan, DeletePlan):
             return self._execute_delete(plan, context)
         raise TypeError(f"unsupported plan type: {type(plan).__name__}")
+
+    def prepare_write(self, plan: Plan, context: ExecutionContext) -> PreparedWrite:
+        """Prepare INSERT/UPDATE candidates through the shared validator.
+
+        This method only reads rows and asks ConstraintValidator to normalize
+        and authorize them. It never allocates pages or changes table state.
+        DDL preparation remains owned by Session/Catalog.
+        """
+        validate_plan(plan)
+        if not isinstance(plan, (InsertPlan, UpdatePlan)):
+            raise NotImplementedError(
+                "prepare_write for DELETE/CREATE_TABLE/CREATE_INDEX belongs to the Session DDL/DML adapter"
+            )
+        validator = context.constraint_validator
+        if validator is None:
+            raise RuntimeError("prepare_write requires ExecutionContext.constraint_validator")
+        if not isinstance(context.session_id, UUID):
+            raise RuntimeError("prepare_write requires Session.session_id")
+        table = plan.table
+        lookup = context.index_manager
+        if lookup is None or not callable(getattr(lookup, "probe", None)):
+            raise RuntimeError("prepare_write requires IndexManager ConstraintLookup")
+        indexes_for_table = getattr(context.catalog, "indexes_for_table", None)
+        if not callable(indexes_for_table):
+            raise RuntimeError("prepare_write requires Catalog.indexes_for_table")
+        affected_indexes = tuple(indexes_for_table(table.ref.table_id))
+        prepared_id = uuid4()
+        generation = context.catalog.generation
+        if type(generation) is not int or generation < 0:
+            raise RuntimeError("catalog generation must be a non-negative int")
+        if isinstance(plan, InsertPlan):
+            validated = validator.validate_insert(
+                table, lookup, plan.row, prepared_id
+            )
+            return PreparedWrite(
+                prepared_id, context.session_id, generation,
+                WriteKind.INSERT, plan.span, table,
+                None, None, (), (), validated.row, (), (), affected_indexes,
+                _encoded_size(context, validated.row, table), validated.token,
+            )
+        if isinstance(plan, UpdatePlan):
+            batch = self._collect_update_batch(plan, context)
+            validated = validator.validate_update(
+                table, lookup, batch, prepared_id
+            )
+            return PreparedWrite(
+                prepared_id, context.session_id, generation,
+                WriteKind.UPDATE, plan.span, table,
+                None, None, (), (), None, validated.batch.items, (), affected_indexes,
+                _encoded_batch_size(context, validated.batch, table), validated.token,
+            )
+
+    def apply_write(self, prepared: PreparedWrite, context: ExecutionContext) -> QueryResult:
+        """Apply one validated batch and then synchronize affected indexes."""
+        if not isinstance(prepared, PreparedWrite):
+            raise TypeError("prepared must be a PreparedWrite")
+        if context.catalog.generation != prepared.catalog_generation:
+            raise RuntimeError("prepared write belongs to an old catalog generation")
+        if context.session_id != prepared.session_id:
+            raise RuntimeError("prepared write belongs to another session")
+        if prepared.kind not in (
+            WriteKind.INSERT,
+            WriteKind.UPDATE,
+            WriteKind.DELETE,
+        ):
+            raise NotImplementedError("DDL apply belongs to Session/Catalog")
+        if prepared.table is None:
+            raise RuntimeError("DML prepared write requires a target table")
+        index_manager = context.index_manager
+        if prepared.affected_indexes and (
+            index_manager is None
+            or not callable(getattr(index_manager, "apply_movements", None))
+        ):
+            raise RuntimeError("indexed write requires IndexManager.apply_movements")
+        token = prepared.validation_token
+        if prepared.kind is WriteKind.INSERT:
+            movement = context.storage.insert_row(
+                prepared.table, prepared.insert_row, token
+            )
+            movements = (movement,)
+        elif prepared.kind is WriteKind.UPDATE:
+            movements = context.storage.update_rows(
+                prepared.table, UpdateBatch(prepared.updates), token
+            )
+        elif prepared.kind is WriteKind.DELETE:
+            movements = context.storage.delete_rows(
+                prepared.table, prepared.deletes, token
+            )
+        if type(movements) is not tuple or any(
+            not isinstance(movement, RowMovement) for movement in movements
+        ):
+            raise TypeError("StorageEngine writes must return RowMovement values")
+        if prepared.affected_indexes:
+            index_manager.apply_movements(prepared.affected_indexes, movements)
+        affected = len(movements)
+        return QueryResult(affected_rows=affected, message=f"{affected} rows written")
 
     def _execute_create_table(
         self, plan: CreateTablePlan, context: ExecutionContext
@@ -262,3 +360,25 @@ class Executor:
         finally:
             stream.close()
         return UpdateBatch(tuple(updates))
+
+
+def _encoded_size(context: ExecutionContext, row: tuple, table: TableDef) -> int:
+    """Read the storage-owned candidate size without duplicating RowCodec."""
+    size_for = getattr(context.storage, "encoded_size", None)
+    if not callable(size_for):
+        raise RuntimeError("prepare_write requires StorageEngine.encoded_size")
+    size = size_for(table, row)
+    if type(size) is not int or size < 0:
+        raise RuntimeError("StorageEngine.encoded_size must return a non-negative int")
+    return size
+
+
+def _encoded_batch_size(
+    context: ExecutionContext, batch: UpdateBatch, table: TableDef
+) -> int:
+    """Record the same old+new byte budget checked by ConstraintValidator."""
+    return sum(
+        _encoded_size(context, item.expected_old, table)
+        + _encoded_size(context, item.new_row, table)
+        for item in batch.items
+    )
