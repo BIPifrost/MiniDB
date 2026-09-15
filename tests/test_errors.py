@@ -49,6 +49,9 @@ from minidb.core.errors import (
     PAGE_CORRUPTED,
     PAGE_ID_INVALID,
     PAGE_NOT_ALLOCATED,
+    NOT_NULL_VIOLATION,
+    NUMERIC_OUT_OF_RANGE,
+    NUMERIC_SCALE_MISMATCH,
     RESERVED_NAME,
     RESERVED_PAGE,
     ROW_CORRUPTED,
@@ -59,6 +62,7 @@ from minidb.core.errors import (
     SLOT_ID_INVALID,
     STALE_ROW,
     STALE_PAGE,
+    VALUE_TOO_LONG,
     TRANSACTION_REQUIRED,
     INVALID_TRANSACTION_STATE,
     TABLE_EXISTS,
@@ -104,8 +108,8 @@ class TestErrorCodes(unittest.TestCase):
     """验证错误码常量（工作计划第 15.12 节）。"""
 
     def test_total_count_is_58(self):
-        """错误码共58个，包含索引页损坏和索引键过长错误。"""
-        self.assertEqual(len(ALL_ERROR_CODES), 58)
+        """错误码共62个，包含索引页损坏、索引键过长和值/非空细化错误。"""
+        self.assertEqual(len(ALL_ERROR_CODES), 62)
 
     def test_all_constants_are_in_all_error_codes(self):
         """每个导出的错误码常量都在 ALL_ERROR_CODES 中。"""
@@ -117,9 +121,10 @@ class TestErrorCodes(unittest.TestCase):
             TABLE_EXISTS, TABLE_NOT_FOUND, COLUMN_NOT_FOUND, DUPLICATE_COLUMN,
             DUPLICATE_INSERT_COLUMN, INSERT_COLUMN_SET_MISMATCH, VALUE_COUNT_MISMATCH,
             RESERVED_NAME, TYPE_MISMATCH, UNSUPPORTED_COMPARISON, CONDITION_NOT_BOOL,
+            VALUE_TOO_LONG, NUMERIC_OUT_OF_RANGE, NUMERIC_SCALE_MISMATCH,
             INVALID_PLAN,
             ROW_TYPE_MISMATCH, ROW_VALUE_COUNT_MISMATCH, ROW_TOO_LARGE,
-            ROW_CORRUPTED, ROW_ENCODING_ERROR,
+            ROW_CORRUPTED, ROW_ENCODING_ERROR, NOT_NULL_VIOLATION,
             PAGE_ID_INVALID, PAGE_NOT_ALLOCATED, PAGE_ALREADY_FREE, RESERVED_PAGE,
             SLOT_ID_INVALID, STALE_ROW, STALE_PAGE, TRANSACTION_REQUIRED,
             INVALID_TRANSACTION_STATE, PAGE_CORRUPTED, DB_FORMAT_MISMATCH,
@@ -130,7 +135,7 @@ class TestErrorCodes(unittest.TestCase):
             ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR, DATABASE_BUSY,
             RESOURCE_LIMIT, FORMAT_VERSION_UNSUPPORTED, RECOVERY_FAILED, COMMIT_OUTCOME_UNKNOWN,
         ]
-        self.assertEqual(len(constants), 58)
+        self.assertEqual(len(constants), 62)
         for code in constants:
             self.assertIn(code, ALL_ERROR_CODES, f"错误码 {code} 不在 ALL_ERROR_CODES 中")
 
@@ -379,6 +384,8 @@ class TestErrorStageMapping(unittest.TestCase):
             TABLE_EXISTS, TABLE_NOT_FOUND, COLUMN_NOT_FOUND, DUPLICATE_COLUMN,
             DUPLICATE_INSERT_COLUMN, INSERT_COLUMN_SET_MISMATCH, VALUE_COUNT_MISMATCH,
             RESERVED_NAME, TYPE_MISMATCH, UNSUPPORTED_COMPARISON, CONDITION_NOT_BOOL,
+            # 值超限写前报 SEMANTIC，RowCodec 复核时同一错误码允许 STORAGE。
+            VALUE_TOO_LONG, NUMERIC_OUT_OF_RANGE, NUMERIC_SCALE_MISMATCH,
         ]
         for code in semantic_codes:
             err = DbError(stage=ErrorStage.SEMANTIC, code=code, message="test", span=_make_span())
@@ -387,7 +394,8 @@ class TestErrorStageMapping(unittest.TestCase):
     def test_storage_errors(self):
         storage_codes = [
             ROW_TYPE_MISMATCH, ROW_VALUE_COUNT_MISMATCH, ROW_TOO_LARGE,
-            ROW_CORRUPTED, ROW_ENCODING_ERROR,
+            ROW_CORRUPTED, ROW_ENCODING_ERROR, NOT_NULL_VIOLATION,
+            VALUE_TOO_LONG, NUMERIC_OUT_OF_RANGE, NUMERIC_SCALE_MISMATCH,
             PAGE_ID_INVALID, PAGE_NOT_ALLOCATED, PAGE_ALREADY_FREE, RESERVED_PAGE,
             SLOT_ID_INVALID, STALE_ROW, STALE_PAGE, TRANSACTION_REQUIRED,
             INVALID_TRANSACTION_STATE, PAGE_CORRUPTED,

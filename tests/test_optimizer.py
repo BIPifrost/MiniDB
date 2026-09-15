@@ -2,7 +2,7 @@
 
 import unittest
 
-from fixtures.contracts import STUDENT_TABLE
+from tests.fixtures.contracts import STUDENT_TABLE
 from minidb.compiler.bound import BoundBinary, BoundColumn, BoundLiteral
 from minidb.compiler.optimizer import Optimizer
 from minidb.compiler.plan import DeletePlan, FilterPlan, ProjectPlan, SeqScanPlan
@@ -42,14 +42,17 @@ class OptimizerTests(unittest.TestCase):
         )
         age_check = BoundBinary(
             ExprOp.GE,
-            BoundColumn(2, DataType.INT, self.span),
+            BoundColumn(2, DataType.INT, self.span,
+                        nullable=STUDENT_TABLE.schema.columns[2].nullable),
             BoundLiteral(18, DataType.INT, self.span),
             DataType.BOOL,
             self.span,
             self.span,
+            nullable=STUDENT_TABLE.schema.columns[2].nullable,
         )
         original_predicate = BoundBinary(
-            ExprOp.AND, always_true, age_check, DataType.BOOL, self.span, self.span
+            ExprOp.AND, always_true, age_check, DataType.BOOL, self.span, self.span,
+            nullable=age_check.nullable,
         )
         original = self.project(FilterPlan(self.scan, original_predicate, self.span))
 
