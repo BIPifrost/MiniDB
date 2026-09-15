@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+
 from minidb.compiler.bound import (
     BoundBinary,
     BoundColumn,
     BoundExpr,
+    BoundIsNull,
     BoundLiteral,
     BoundUnary,
 )
@@ -29,7 +33,7 @@ def evaluate(expr: BoundExpr, row: Row) -> int | str | bool:
     API 调用的基本形状，避免错误列号变成难懂的 IndexError，或让 Python
     把 bool 当作 int 悄悄参与比较。
     """
-    if not isinstance(expr, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary)):
+    if not isinstance(expr, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary, BoundIsNull)):
         _invalid_plan(expr, "expr", "BoundExpr", type(expr).__name__)
     if type(row) is not tuple:
         raise DbError(
@@ -70,6 +74,13 @@ def _evaluate(
 
     active.add(identity)
     try:
+        # IS [NOT] NULL：永远产生实际 bool，不进入三值 UNKNOWN。
+        if isinstance(expr, BoundIsNull):
+            operand_expr = _require_child(expr, expr.operand, "operand")
+            operand = _evaluate(operand_expr, row, active)
+            is_null = operand is None
+            return not is_null if expr.negated else is_null
+
         if isinstance(expr, BoundUnary):
             operand_expr = _require_child(expr, expr.operand, "operand")
             _require_operation(
@@ -78,6 +89,8 @@ def _evaluate(
                 operand_types=(operand_expr.data_type,),
             )
             operand = _evaluate(operand_expr, row, active)
+            if operand is None:
+                return None
             if type(operand) is not bool:
                 _invalid_plan(expr, "operand", "BOOL 值", type(operand).__name__)
             return not operand
@@ -92,25 +105,32 @@ def _evaluate(
             operand_types=(left_expr.data_type, right_expr.data_type),
         )
 
-        # 编译阶段已经检查完整表达式；运行阶段才按 SQL 语义短路，从而不会
-        # 求值本行上不需要的右分支。
+        # 编译阶段已经检查完整表达式；运行阶段才按 SQL 三值逻辑短路，从而
+        # 不会求值本行上不需要的右分支。NULL 参与比较的结果为 UNKNOWN(None)，
+        # WHERE 只保留 `value is True` 的行（见计划 §4.4）。
         left = _evaluate(left_expr, row, active)
         if expr.op is ExprOp.AND:
-            _require_bool(expr, left, "left")
-            if not left:
+            if left is False:
                 return False
             right = _evaluate(right_expr, row, active)
-            _require_bool(expr, right, "right")
-            return right
+            if right is False:
+                return False
+            if left is True and right is True:
+                return True
+            return None
         if expr.op is ExprOp.OR:
-            _require_bool(expr, left, "left")
-            if left:
+            if left is True:
                 return True
             right = _evaluate(right_expr, row, active)
-            _require_bool(expr, right, "right")
-            return right
+            if right is True:
+                return True
+            if left is False and right is False:
+                return False
+            return None
 
         right = _evaluate(right_expr, row, active)
+        if left is None or right is None:
+            return None
         operations = {
             ExprOp.EQ: lambda: left == right,
             ExprOp.NE: lambda: left != right,
@@ -134,11 +154,11 @@ def _require_operation(
     if not allowed:
         _invalid_plan(expr, "op", "与节点元数匹配的 ExprOp", repr(expr.op))
     for index, data_type in enumerate(operand_types):
-        if not isinstance(data_type, DataType):
+        if data_type is not None and not isinstance(data_type, DataType):
             _invalid_plan(
                 expr,
                 f"operand_types[{index}]",
-                "DataType",
+                "DataType 或 None(NULL)",
                 repr(data_type),
             )
     result = resolve_result_type(expr.op, operand_types)
@@ -156,7 +176,7 @@ def _require_child(
     child: object,
     field: str,
 ) -> BoundExpr:
-    if not isinstance(child, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary)):
+    if not isinstance(child, (BoundColumn, BoundLiteral, BoundUnary, BoundBinary, BoundIsNull)):
         _invalid_plan(parent, field, "BoundExpr", type(child).__name__)
     return child
 
@@ -166,19 +186,19 @@ def _require_value_type(
     value: object,
     data_type: object,
 ) -> None:
+    # NULL 是合法值（三值逻辑），不视为类型错误；DATE/DECIMAL 为 v2 公共类型。
+    if value is None:
+        return
     expected = {
         DataType.INT: int,
         DataType.VARCHAR: str,
         DataType.BOOL: bool,
+        DataType.DATE: date,
+        DataType.DECIMAL: Decimal,
     }.get(data_type)
     if expected is None or type(value) is not expected:
         expected_name = data_type.name if isinstance(data_type, DataType) else "DataType"
         _invalid_plan(expr, "value", expected_name, type(value).__name__)
-
-
-def _require_bool(expr: BoundBinary, value: object, field: str) -> None:
-    if type(value) is not bool:
-        _invalid_plan(expr, field, "BOOL 值", type(value).__name__)
 
 
 def _invalid_plan(
