@@ -9,8 +9,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
+from datetime import date
 from uuid import UUID, uuid4
 
+from minidb.compiler.bound import (
+    BoundBinary,
+    BoundColumn,
+    BoundIsNull,
+    BoundLiteral,
+    BoundUnary,
+)
 from minidb.catalog.catalog_manager import CatalogManager
 from minidb.compiler.lexer import Lexer
 from minidb.compiler.optimizer import Optimizer
@@ -29,13 +37,17 @@ from minidb.core.errors import (
     INVALID_ARGUMENT,
     RESOURCE_LIMIT,
 )
-from minidb.core.result import QueryResult, ResultCursor, StatementResult
-from minidb.core.records import StoredRow, _issue_validated_write_token
+from minidb.core.expressions import ExprOp
+from minidb.core.result import QueryResult, ResultColumn, ResultCursor, StatementResult
+from minidb.core.records import StoredRow, WriteKind, _issue_validated_write_token
+from minidb.core.schema import DataType, IndexDef, IndexOrigin, TableDef
 from minidb.core.source import SourceText
 from minidb.core.transaction import TransactionGuard, TransactionState
 from minidb.engine.context import ExecutionContext
 from minidb.engine.executor import Executor
+from minidb.engine.write_contract import PreparedWrite
 from minidb.storage.buffer_pool import BufferPool
+from minidb.storage.constraints import ConstraintValidator
 from minidb.storage.file_manager import FileManager
 from minidb.storage.file_lock import DatabaseLock
 from minidb.storage.recovery import RecoveryManager
@@ -43,7 +55,18 @@ from minidb.storage.row_codec import RowCodec
 from minidb.storage.storage_engine import StorageEngine
 from minidb.storage.index_manager import IndexManager
 from minidb.storage.transaction import TransactionManager
-from minidb.compiler.plan import DeletePlan, ExplainPlan, ProjectPlan, InsertPlan, UpdatePlan
+from minidb.compiler.plan import (
+    CreateTablePlan,
+    DeletePlan,
+    DescribePlan,
+    ExplainPlan,
+    FilterPlan,
+    IndexScanPlan,
+    InsertPlan,
+    ProjectPlan,
+    SeqScanPlan,
+    UpdatePlan,
+)
 
 
 # 兼容物化入口的上限（工作计划 7.4）：生产 CLI 只走 iter_results。
@@ -70,6 +93,7 @@ class Session:
         file_manager: FileManager | None = None,
         buffer_pool: BufferPool | None = None,
         guard: TransactionGuard | None = None,
+        row_codec: RowCodec | None = None,
         index_manager: IndexManager | None = None,
         transaction_manager: TransactionManager | None = None,
     ) -> None:
@@ -100,7 +124,15 @@ class Session:
         self.guard = guard
         self.index_manager = index_manager
         self.transaction_manager = transaction_manager
+        self.row_codec = row_codec if row_codec is not None else RowCodec()
         self.session_id = uuid4()
+        # 约束校验读同一份目录与索引；没有 IndexManager 的旧装配保持 None，
+        # 由调用方继续走 v1 存储路径，不在 Session 内伪造第二套约束规则。
+        self.constraint_validator = (
+            ConstraintValidator(self, catalog, self.row_codec, index_manager)
+            if index_manager is not None
+            else None
+        )
         self._validated_tokens: set[object] = set()
         self._active_cursor: ResultCursor | None = None
         self._current_prepared_id: UUID | None = None
@@ -130,7 +162,8 @@ class Session:
             guard = TransactionGuard(TransactionState.READ_ONLY_STARTUP)
             file_manager = FileManager.open_locked(actual, lock_handle, guard=guard)
             buffer_pool = BufferPool(file_manager, capacity=buffer_pages, policy=policy)
-            storage = StorageEngine(buffer_pool, RowCodec(), file_manager, guard)
+            row_codec = RowCodec()
+            storage = StorageEngine(buffer_pool, row_codec, file_manager, guard)
 
             # CatalogManager 在读取目录时需要索引根校验，但 IndexManager 又依赖
             # 已加载目录。启动阶段先登记待校验项，目录加载完成后由 IndexManager
@@ -175,6 +208,7 @@ class Session:
                 file_manager=file_manager,
                 buffer_pool=buffer_pool,
                 guard=guard,
+                row_codec=row_codec,
                 index_manager=index_manager,
             )
             session_holder["session"] = session
@@ -300,7 +334,7 @@ class Session:
                         "stage": "OPTIMIZED_PLAN",
                         "data": {"enabled": self.optimize, "plan": plan},
                     })
-                context = ExecutionContext(self.catalog, self.storage, self.index_manager)
+                context = self._context()
                 in_transaction = self._begin_if_needed(plan)
                 if isinstance(plan, ProjectPlan):
                     result = self._materialize_select(plan, context, materialize)
@@ -439,7 +473,7 @@ class Session:
                     sink({"statement_index": statement_index, "stage": "PLAN", "data": original_plan})
                     sink({"statement_index": statement_index, "stage": "OPTIMIZED_PLAN",
                           "data": {"enabled": self.optimize, "plan": plan}})
-                context = ExecutionContext(self.catalog, self.storage, self.index_manager)
+                context = self._context()
                 if isinstance(plan, ProjectPlan):
                     cursor = self.executor.execute_read(plan, context)
                     self._active_cursor = cursor
@@ -516,39 +550,124 @@ class Session:
         return token
 
     def _execute_plan(self, plan, context):
-        # Executor 的旧 insert 分支尚未携带 v2 token；Session 在事务边界
-        # 内适配这一条调用，其他计划仍交给 Executor 保持职责单一。
-        if isinstance(plan, InsertPlan) and self.transaction_manager is not None:
-            token = self._issue_token()
-            self.storage.insert_row(plan.table, plan.row, token)
-            return QueryResult(affected_rows=1, message="1 row inserted")
-        if isinstance(plan, DeletePlan) and self.transaction_manager is not None:
-            stream = self.executor._execute_stream(plan.child, context)
-            try:
-                expected = tuple(
-                    StoredRow(record.row_id, record.values)
-                    for record in stream
-                    if record.row_id is not None
-                )
-            finally:
-                stream.close()
-            if not expected:
-                return QueryResult(affected_rows=0, message="0 rows deleted")
-            token = self._issue_token()
-            movements = self.storage.delete_rows(plan.table, expected, token)
-            return QueryResult(affected_rows=len(movements), message=f"{len(movements)} rows deleted")
-        if isinstance(plan, UpdatePlan) and self.transaction_manager is not None:
-            batch = self.executor._collect_update_batch(plan, context)
-            if not batch.items:
-                return QueryResult(affected_rows=0, message="0 rows updated")
-            token = self._issue_token()
-            movements = self.storage.update_rows(plan.table, batch, token)
-            return QueryResult(affected_rows=len(movements), message=f"{len(movements)} rows updated")
+        # v2 写路径统一先 prepare 再 apply：INSERT/UPDATE 的候选由
+        # ConstraintValidator 归一化并授权，DELETE 由 Session 按同一合同
+        # 组装，随后统一由 Executor 落页并同步受影响索引。没有事务管理器
+        # 的旧装配继续走 Executor 的 v1 入口，避免在 Session 内维护两套写入。
+        if self.transaction_manager is not None:
+            if isinstance(plan, CreateTablePlan):
+                result = self.executor.execute(plan, context)
+                # 约束索引必须在建表同一事务内建立：校验器要求每个 unique
+                # 列都有对应自动索引，否则后续写入报 CATALOG_CORRUPTED。
+                self._create_constraint_indexes(plan.table_name)
+                return result
+            if isinstance(plan, InsertPlan):
+                prepared = self.executor.prepare_write(plan, context)
+                return self.executor.apply_write(prepared, context)
+            if isinstance(plan, UpdatePlan):
+                prepared = self.executor.prepare_write(plan, context)
+                return self.executor.apply_write(prepared, context)
+            if isinstance(plan, DeletePlan):
+                prepared = self._prepare_delete(plan, context)
+                if prepared is None:
+                    return QueryResult(affected_rows=0, message="0 rows deleted")
+                return self.executor.apply_write(prepared, context)
+        # DESCRIBE/EXPLAIN 是只读诊断计划（工作计划 7.3、9.2）：只读目录和
+        # 计划本身，不开启写事务、不访问数据页，因此由 Session 直接产出结果。
+        if isinstance(plan, DescribePlan):
+            return _describe_result(plan.table)
+        if isinstance(plan, ExplainPlan):
+            return _explain_result(
+                plan.child, self._indexes_for_plan(plan.child), self.optimizer
+            )
         return self.executor.execute(plan, context)
+
+    def _context(self) -> ExecutionContext:
+        """构造执行上下文；约束校验与 token 身份随会话一起传入。"""
+        return ExecutionContext(
+            self.catalog,
+            self.storage,
+            self.index_manager,
+            self.constraint_validator,
+            self.session_id,
+        )
+
+    def _create_constraint_indexes(self, table_name: str) -> None:
+        """为新建表的 PRIMARY KEY/UNIQUE 列建立自动索引。
+
+        工作计划 4.2：Session 只负责驱动，B+ 树算法由 IndexManager 提供。
+        索引名与 IndexDef 校验规则由 core.schema 固定；必须先建树再登记，
+        因为 persist_and_register_index 会校验锚页已是合法索引页。
+        """
+        if self.index_manager is None:
+            return
+        table = self.catalog.find_table(table_name)
+        if not isinstance(table, TableDef):
+            return
+        for position, column in enumerate(table.schema.columns):
+            if not column.unique:
+                continue
+            origin = (
+                IndexOrigin.PRIMARY_KEY
+                if column.primary_key
+                else IndexOrigin.UNIQUE_CONSTRAINT
+            )
+            prefix = "pk" if origin is IndexOrigin.PRIMARY_KEY else "uq"
+            index = IndexDef(
+                self.catalog.reserve_index_id(),
+                f"_sys_{prefix}_{table.ref.table_id}_{position}",
+                table.ref.table_id,
+                position,
+                self.index_manager.reserve_anchor(),
+                True,
+                origin,
+            )
+            # 新表还没有行，空索引即正确初始状态。
+            self.index_manager.create(index, ())
+            self.catalog.persist_and_register_index(index)
+
+    def _prepare_delete(self, plan: DeletePlan, context: ExecutionContext):
+        """收集 DELETE 候选并签发 token，形状与 Executor.prepare_write 一致。"""
+        stream = self.executor._execute_stream(plan.child, context)
+        try:
+            expected = tuple(
+                StoredRow(record.row_id, record.values)
+                for record in stream
+                if record.row_id is not None
+            )
+        finally:
+            stream.close()
+        if not expected:
+            return None
+        prepared_id = uuid4()
+        token = _issue_validated_write_token(
+            self.session_id, self.catalog.generation, prepared_id
+        )
+        self.register_validated_token(token)
+        return PreparedWrite(
+            prepared_id,
+            self.session_id,
+            self.catalog.generation,
+            WriteKind.DELETE,
+            plan.span,
+            plan.table,
+            None,
+            None,
+            (),
+            (),
+            None,
+            (),
+            expected,
+            tuple(self.catalog.indexes_for_table(plan.table.ref.table_id)),
+            sum(self.storage.encoded_size(plan.table, row.values) for row in expected),
+            token,
+        )
 
     def _begin_if_needed(self, plan) -> bool:
         """Mutating plans run inside one TransactionManager statement."""
-        if self.transaction_manager is None or isinstance(plan, ProjectPlan):
+        if self.transaction_manager is None or isinstance(
+            plan, (ProjectPlan, DescribePlan, ExplainPlan)
+        ):
             return False
         self._ensure_no_active_cursor("Session._begin_if_needed")
         self._current_prepared_id = self.transaction_manager.begin_statement()
@@ -732,6 +851,181 @@ def _row_bytes(row) -> int:
         else:
             total += len(repr(value).encode("utf-8"))
     return total
+
+
+# DESCRIBE 的固定输出列（工作计划 7.3）；列顺序与类型属于对外契约。
+DESCRIBE_COLUMNS = (
+    ResultColumn("name", DataType.VARCHAR),
+    ResultColumn("type", DataType.VARCHAR),
+    ResultColumn("nullable", DataType.BOOL),
+    ResultColumn("primary_key", DataType.BOOL),
+    ResultColumn("unique", DataType.BOOL),
+    ResultColumn("default", DataType.VARCHAR),
+)
+
+EXPLAIN_COLUMN = ResultColumn("plan", DataType.VARCHAR)
+
+_OP_TEXT = {
+    ExprOp.EQ: "=",
+    ExprOp.NE: "!=",
+    ExprOp.LT: "<",
+    ExprOp.LE: "<=",
+    ExprOp.GT: ">",
+    ExprOp.GE: ">=",
+    ExprOp.AND: "AND",
+    ExprOp.OR: "OR",
+}
+
+
+def _describe_result(table) -> QueryResult:
+    """只读目录元信息；不访问数据页，也不开启写事务（工作计划 9.2）。"""
+    rows = [
+        (
+            column.name,
+            _type_text(column.type_spec),
+            column.nullable,
+            column.primary_key,
+            column.unique,
+            _default_text(column.default),
+        )
+        for column in table.schema.columns
+    ]
+    return QueryResult(
+        columns=list(DESCRIBE_COLUMNS),
+        rows=rows,
+        message=f"{len(rows)} columns",
+    )
+
+
+def _explain_result(child, indexes: tuple, optimizer) -> QueryResult:
+    """把计划渲染成一行一个可读节点，不执行内部语句。
+
+    工作计划 7.3 要求 EXPLAIN 在索引可用时如实显示 IndexScan 及边界，
+    因此这里对子计划固定应用索引选择；没有可用索引时保持原 SeqScan，
+    不伪称已选择索引。渲染只读取计划结构，不触发任何页访问。
+    """
+    selected = optimizer.optimize(child, indexes) if indexes else child
+    lines: list[str] = []
+    _append_plan_lines(selected, 0, lines)
+    return QueryResult(
+        columns=[EXPLAIN_COLUMN],
+        rows=[(line,) for line in lines],
+        message=f"{len(lines)} plan nodes",
+    )
+
+
+def _append_plan_lines(plan, depth: int, lines: list[str]) -> None:
+    pad = "  " * depth
+    if isinstance(plan, ProjectPlan):
+        lines.append(f"{pad}Project")
+        _append_plan_lines(plan.child, depth + 1, lines)
+    elif isinstance(plan, FilterPlan):
+        lines.append(f"{pad}Filter {_predicate_text(plan.predicate, _plan_table(plan))}")
+        _append_plan_lines(plan.child, depth + 1, lines)
+    elif isinstance(plan, IndexScanPlan):
+        lines.append(f"{pad}{_index_scan_text(plan)}")
+    elif isinstance(plan, SeqScanPlan):
+        lines.append(f"{pad}SeqScan {plan.table.ref.name}")
+    elif isinstance(plan, UpdatePlan):
+        lines.append(f"{pad}Update {plan.table.ref.name}")
+        _append_plan_lines(plan.child, depth + 1, lines)
+    elif isinstance(plan, DeletePlan):
+        lines.append(f"{pad}Delete {plan.table.ref.name}")
+        _append_plan_lines(plan.child, depth + 1, lines)
+    elif isinstance(plan, InsertPlan):
+        lines.append(f"{pad}Insert {plan.table.ref.name}")
+    else:
+        lines.append(f"{pad}{type(plan).__name__}")
+
+
+def _plan_table(plan):
+    """取计划子树对应的表，用于把 BoundColumn 的列序号还原成列名。"""
+    table = getattr(plan, "table", None)
+    if table is not None:
+        return table
+    child = getattr(plan, "child", None)
+    return _plan_table(child) if child is not None else None
+
+
+def _index_scan_text(plan: IndexScanPlan) -> str:
+    column = plan.table.schema.columns[plan.index.column_index].name
+    head = f"IndexScan {plan.index.name} {plan.table.ref.name}({column})"
+    return f"{head} {_index_bounds_text(plan)}"
+
+
+def _index_bounds_text(plan: IndexScanPlan) -> str:
+    if plan.null_only:
+        return "IS NULL"
+    if (plan.has_lower and plan.has_upper and plan.lower_inclusive
+            and plan.upper_inclusive and plan.lower.value == plan.upper.value):
+        return f"= {_plan_value_text(plan.lower.value)}"
+    parts = []
+    if plan.has_lower:
+        op = ">=" if plan.lower_inclusive else ">"
+        parts.append(f"{op} {_plan_value_text(plan.lower.value)}")
+    if plan.has_upper:
+        op = "<=" if plan.upper_inclusive else "<"
+        parts.append(f"{op} {_plan_value_text(plan.upper.value)}")
+    return " AND ".join(parts) if parts else "all keys"
+
+
+def _predicate_text(expr, table) -> str:
+    if isinstance(expr, BoundColumn):
+        return _column_text(expr.index, table)
+    if isinstance(expr, BoundLiteral):
+        return _plan_value_text(expr.value)
+    if isinstance(expr, BoundUnary):
+        return f"NOT {_predicate_text(expr.operand, table)}"
+    if isinstance(expr, BoundBinary):
+        op = _OP_TEXT.get(expr.op, expr.op.name)
+        left = _predicate_text(expr.left, table)
+        right = _predicate_text(expr.right, table)
+        return f"({left} {op} {right})"
+    if isinstance(expr, BoundIsNull):
+        suffix = "IS NOT NULL" if expr.negated else "IS NULL"
+        return f"{_predicate_text(expr.operand, table)} {suffix}"
+    return type(expr).__name__
+
+
+def _column_text(index: int, table) -> str:
+    if table is not None and 0 <= index < len(table.schema.columns):
+        return table.schema.columns[index].name
+    return f"#{index}"
+
+
+def _plan_value_text(value) -> str:
+    """计划文本里的字面量；字符串按 SQL 字面量加引号以便区分列名。"""
+    if value is None:
+        return "NULL"
+    if type(value) is bool:
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, str):
+        return f"'{value}'"
+    if isinstance(value, date):
+        return f"DATE '{value.isoformat()}'"
+    return str(value)
+
+
+def _type_text(spec) -> str:
+    """DESCRIBE 的 type 列；只输出规范类型文本。"""
+    if spec.kind is DataType.VARCHAR:
+        return f"VARCHAR({spec.length})"
+    if spec.kind is DataType.DECIMAL:
+        return f"DECIMAL({spec.precision},{spec.scale})"
+    return spec.kind.name
+
+
+def _default_text(default) -> str | None:
+    """无默认值返回 NULL 值；默认 SQL NULL 返回字符串 NULL（工作计划 7.3）。"""
+    if not default.has_default:
+        return None
+    if default.value is None:
+        return "NULL"
+    if type(default.value) is bool:
+        return "TRUE" if default.value else "FALSE"
+    if isinstance(default.value, date):
+        return default.value.isoformat()
+    return str(default.value)
 
 
 def _source_text(text: str, source_name: str, operation: str) -> SourceText:

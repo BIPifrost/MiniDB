@@ -75,12 +75,13 @@ class QueryResult:
 class ResultCursor:
     """Closeable, single-pass stream of validated result rows.
 
-    Handoff note: Executor can open this cursor today. Session.iter_results
-    and CLI integration are still pending; callers must explicitly exhaust
-    or close it before starting another statement or closing the database.
+    ``Session.iter_results`` yields this cursor for SELECT and the CLI consumes
+    it row by row. Callers must explicitly exhaust or close it before starting
+    another statement or closing the database; ``close`` is repeatable and
+    retries whatever the previous failed attempt could not release.
     """
 
-    __slots__ = ("_columns", "_rows", "_close", "_closed")
+    __slots__ = ("_columns", "_rows", "_close", "_closed", "_rows_released", "_owner_released")
 
     def __init__(
         self,
@@ -101,6 +102,10 @@ class ResultCursor:
         self._rows = rows
         self._close = close
         self._closed = False
+        # 释放状态与“逻辑关闭”分开记录：关闭失败时保留未释放标记，
+        # 让调用方可以再次 close() 重试，而不是永久丢失底层清理。
+        self._rows_released = False
+        self._owner_released = close is None
 
     @property
     def columns(self) -> tuple[ResultColumn, ...]:
@@ -108,7 +113,8 @@ class ResultCursor:
 
     @property
     def closed(self) -> bool:
-        return self._closed
+        """底层行来源与宿主是否都已释放；关闭失败时仍为 False。"""
+        return self._rows_released and self._owner_released
 
     def __iter__(self) -> "ResultCursor":
         return self
@@ -133,18 +139,28 @@ class ResultCursor:
             raise
 
     def close(self) -> None:
-        """Close the row source and optional owner; repeated calls do nothing."""
-        if self._closed:
-            return
+        """关闭行来源和可选宿主；可重复调用。
+
+        再次调用只重试上一次没有成功释放的那一步，已经完成的清理不会
+        重复执行。关闭失败时抛出首个错误，并保留未释放状态供调用方重试；
+        一旦全部释放，后续调用直接返回。
+        """
         self._closed = True
         first_error: BaseException | None = None
-        row_close = getattr(self._rows, "close", None)
-        if callable(row_close):
-            try:
-                row_close()
-            except BaseException as error:
-                first_error = error
-        if self._close is not None:
+
+        if not self._rows_released:
+            row_close = getattr(self._rows, "close", None)
+            if callable(row_close):
+                try:
+                    row_close()
+                except BaseException as error:
+                    first_error = error
+                else:
+                    self._rows_released = True
+            else:
+                self._rows_released = True
+
+        if not self._owner_released:
             try:
                 self._close()
             except BaseException as error:
@@ -152,6 +168,9 @@ class ResultCursor:
                     first_error = error
                 else:
                     first_error.add_note(f"closing cursor owner also failed: {error}")
+            else:
+                self._owner_released = True
+
         if first_error is not None:
             raise first_error
 

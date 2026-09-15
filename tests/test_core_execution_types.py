@@ -103,6 +103,60 @@ class ExecutionTypeTests(unittest.TestCase):
         self.assertTrue(cursor.closed)
         self.assertEqual(events, ["close"])
 
+    def test_result_cursor_retries_a_failed_release_instead_of_losing_it(self):
+        class FlakyScan:
+            def __init__(self):
+                self.attempts = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                raise StopIteration
+
+            def close(self):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("close boom")
+
+        scan = FlakyScan()
+        cursor = ResultCursor((ResultColumn("id", "INT"),), scan)
+
+        # 关闭失败必须抛出首个错误，但不能把游标标成已释放；否则底层扫描
+        # 再也不会被补关，资源泄漏会被静默吞掉（工作计划 7.4）。
+        with self.assertRaisesRegex(RuntimeError, "close boom"):
+            cursor.close()
+        self.assertFalse(cursor.closed)
+
+        cursor.close()
+        self.assertTrue(cursor.closed)
+        self.assertEqual(scan.attempts, 2)
+
+        # 全部释放之后重复调用不再碰底层资源。
+        cursor.close()
+        self.assertEqual(scan.attempts, 2)
+
+    def test_result_cursor_keeps_successful_cleanup_and_retries_only_the_failure(self):
+        events = []
+        scan = ListRowScan(())
+
+        def owner_close():
+            events.append("owner")
+            if len(events) == 1:
+                raise RuntimeError("owner boom")
+
+        cursor = ResultCursor(
+            (ResultColumn("id", "INT"),), scan, close=owner_close
+        )
+        with self.assertRaisesRegex(RuntimeError, "owner boom"):
+            cursor.close()
+        self.assertFalse(cursor.closed)
+        self.assertTrue(scan.closed)
+
+        cursor.close()
+        self.assertTrue(cursor.closed)
+        self.assertEqual(events, ["owner", "owner"])
+
     def test_command_result_is_query_result_compatibility_alias(self):
         self.assertIs(CommandResult, QueryResult)
 
