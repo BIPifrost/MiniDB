@@ -1,4 +1,4 @@
-"""R04/R08：真实进程终止，每个策略每个故障点重复三次。"""
+"""六个物理恢复故障点：真实进程终止，每个策略每点重复三次。"""
 import hashlib
 import json
 import os
@@ -47,8 +47,8 @@ class RecoveryPhaseTests(unittest.TestCase):
             self.assertTrue(line, f'{case}进程提前退出')
             event = json.loads(line)
             self.assertEqual(event['phase'], expected)
-            self.assertFalse(event['committed'])
-            self.assertEqual(event['tail_length'], 0)
+            self.assertEqual(event['committed'], case == 'R06')
+            self.assertEqual(event['tail_length'], 64 if case == 'R06' else 0)
             process.kill()
             process.wait(timeout=15)
             self.assertNotEqual(process.returncode, 0)
@@ -133,3 +133,86 @@ class RecoveryPhaseTests(unittest.TestCase):
 
     def test_r08_killed_partial_restore_can_restart(self):
         self.run_case('R08')
+
+    def run_additional_case(self, case, phase):
+        evidence = []
+        for policy in ('lru', 'fifo'):
+            for repeat in range(1, 4):
+                with self.subTest(case=case, policy=policy, repeat=repeat), tempfile.TemporaryDirectory() as temp:
+                    path = Path(temp) / 'phase.db'
+                    path.write_bytes(ORIGINAL)
+                    event = self.terminate_at_phase(path, case, policy, phase)
+                    changed = path.read_bytes()
+                    self.assertEqual(event['sha256'], digest(changed))
+                    formal = Path(str(path) + '.mdb2-journal')
+                    temporary = Path(str(formal) + '.tmp')
+                    self.assertEqual(formal.exists(), case != 'R01')
+                    self.assertEqual(event['journal_exists'], case != 'R01')
+                    self.assertEqual(temporary.exists(), case == 'R01')
+                    if case == 'R01':
+                        partial = temporary.read_bytes()
+                        self.assertEqual(event['copied_bytes'], 4113)
+                        self.assertEqual(partial, bytes(journal.HEADER_SIZE) + ORIGINAL[:4113])
+                        journal_hash = digest(partial)
+                    else:
+                        journal_bytes = formal.read_bytes()
+                        journal_hash = digest(journal_bytes)
+                        with formal.open('rb') as stream:
+                            info = journal.inspect_stream(stream)
+                        self.assertEqual(info.committed, case == 'R06')
+                        self.assertEqual(info.snapshot.payload_sha256, hashlib.sha256(ORIGINAL).digest())
+                        self.assertEqual(journal_bytes[128:128+len(ORIGINAL)], ORIGINAL)
+                    if case in ('R01', 'R02'):
+                        self.assertEqual(changed, ORIGINAL)
+                    else:
+                        self.assertEqual(len(changed), 21*4096)
+                        header = page_v2.decode_file_header(changed[:4096], file_size=len(changed))
+                        self.assertEqual(header.database_uuid, DB)
+                        self.assertEqual(header.next_page_id, 21)
+                        self.assertEqual(header.free_head, 18)
+                        self.assertEqual(changed[3*4096:5*4096], b'B'*(2*4096))
+                        for page in (0, 1, 2, 18, 19):
+                            self.assertNotEqual(changed[page*4096:(page+1)*4096], ORIGINAL[page*4096:(page+1)*4096])
+                    expected = changed if case == 'R06' else ORIGINAL
+                    report = self.recover(path, policy)
+                    self.assertEqual(report['action'], {'R01': 'NONE', 'R06': 'COMMITTED_CLEANED'}.get(case, 'ROLLED_BACK'))
+                    self.assertEqual(report['restored_bytes'], len(ORIGINAL) if case in ('R02', 'R03') else 0)
+                    self.assertEqual(path.read_bytes(), expected)
+                    self.assertEqual(report['sha256'], digest(expected))
+                    self.assertEqual(report['length'], len(expected))
+                    self.assertEqual(report['free_pages'], [18] if case == 'R06' else [19])
+                    self.assertEqual(report['next_page_id'], 21 if case == 'R06' else 20)
+                    self.assertFalse(formal.exists())
+                    self.assertFalse(temporary.exists())
+                    again = self.recover(path, policy)
+                    self.assertEqual(again['action'], 'NONE')
+                    self.assertEqual(path.read_bytes(), expected)
+                    self.assertEqual(again['sha256'], digest(expected))
+                    evidence.append({'case_id': case, 'policy': policy, 'capacity': 1,
+                                     'repeat': repeat, 'seed': 'fixed-bytes',
+                                     'original_sha256': digest(ORIGINAL), 'changed_sha256': digest(changed),
+                                     'journal_sha256': journal_hash, 'writer': event,
+                                     'recovered': report, 'second_reopen': again,
+                                     'journal_after': 'absent', 'passed': True,
+                                     'logical_rows': '仅物理目录页镜像，不代表目录语义或SQL验收'})
+        self.assertEqual(len(evidence), 6)
+        output = os.environ.get('MINIDB_RECOVERY_EVIDENCE_DIR')
+        if output:
+            directory = Path(output)
+            directory.mkdir(parents=True, exist_ok=True)
+            payload = {'platform': platform.platform(), 'python': sys.version,
+                       'source_revision': os.environ.get('MINIDB_TEST_REVISION', 'unspecified'),
+                       'cases': evidence}
+            (directory / (case + '.json')).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def test_r01_partial_tmp_never_becomes_formal_journal(self):
+        self.run_additional_case('R01', 'TMP_PAYLOAD_PARTIALLY_COPIED')
+
+    def test_r02_published_journal_before_business_writes(self):
+        self.run_additional_case('R02', 'JOURNAL_PUBLISHED_BEFORE_WRITES')
+
+    def test_r03_written_header_catalog_free_and_data_pages_roll_back(self):
+        self.run_additional_case('R03', 'HEADER_CATALOG_FREE_DATA_WRITTEN')
+
+    def test_r06_synced_commit_tail_preserves_new_image(self):
+        self.run_additional_case('R06', 'COMMIT_TAIL_SYNCED_BEFORE_CLEANUP')
