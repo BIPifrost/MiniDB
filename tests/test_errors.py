@@ -27,7 +27,9 @@ from minidb.core.errors import (
     DB_FILE_TRUNCATED,
     DB_FORMAT_MISMATCH,
     DUPLICATE_COLUMN,
+    DUPLICATE_CONSTRAINT,
     DUPLICATE_INSERT_COLUMN,
+    DUPLICATE_UPDATE_COLUMN,
     ErrorStage,
     ID_EXHAUSTED,
     IDENTIFIER_TOO_LONG,
@@ -38,6 +40,7 @@ from minidb.core.errors import (
     INTERNAL_ERROR,
     INVALID_ARGUMENT,
     INVALID_CHARACTER,
+    INVALID_DATE,
     INVALID_NUMBER,
     INVALID_PLAN,
     IO_CLOSE_FAILED,
@@ -46,6 +49,7 @@ from minidb.core.errors import (
     CONFLICTING_CONSTRAINT,
     INDEX_EXISTS,
     INVALID_TYPE_PARAMETER,
+    MISSING_REQUIRED_COLUMN,
     PRIMARY_KEY_VIOLATION,
     UNIQUE_VIOLATION,
     IO_SYNC_FAILED,
@@ -112,9 +116,9 @@ class TestErrorStage(unittest.TestCase):
 class TestErrorCodes(unittest.TestCase):
     """验证错误码常量（工作计划第 15.12 节）。"""
 
-    def test_total_count_is_58(self):
-        """错误码共67个，包含索引页损坏、索引键过长和值/约束细化错误。"""
-        self.assertEqual(len(ALL_ERROR_CODES), 67)
+    def test_total_count_is_71(self):
+        """错误码共71个，包含索引页损坏、索引键过长和值/约束细化错误。"""
+        self.assertEqual(len(ALL_ERROR_CODES), 71)
 
     def test_all_constants_are_in_all_error_codes(self):
         """每个导出的错误码常量都在 ALL_ERROR_CODES 中。"""
@@ -124,7 +128,9 @@ class TestErrorCodes(unittest.TestCase):
             INVALID_NUMBER, IDENTIFIER_TOO_LONG,
             UNEXPECTED_TOKEN, UNEXPECTED_EOF, UNSUPPORTED_FEATURE, INT_OUT_OF_RANGE,
             TABLE_EXISTS, TABLE_NOT_FOUND, COLUMN_NOT_FOUND, DUPLICATE_COLUMN,
-            DUPLICATE_INSERT_COLUMN, INSERT_COLUMN_SET_MISMATCH, VALUE_COUNT_MISMATCH,
+            DUPLICATE_INSERT_COLUMN, DUPLICATE_CONSTRAINT, INSERT_COLUMN_SET_MISMATCH,
+            VALUE_COUNT_MISMATCH, MISSING_REQUIRED_COLUMN, DUPLICATE_UPDATE_COLUMN,
+            INVALID_DATE,
             RESERVED_NAME, TYPE_MISMATCH, UNSUPPORTED_COMPARISON, CONDITION_NOT_BOOL,
             VALUE_TOO_LONG, NUMERIC_OUT_OF_RANGE, NUMERIC_SCALE_MISMATCH,
             CONFLICTING_CONSTRAINT, INVALID_TYPE_PARAMETER, INDEX_EXISTS,
@@ -142,7 +148,7 @@ class TestErrorCodes(unittest.TestCase):
             ACTIVE_SCAN, CLOSED, INVALID_ARGUMENT, INTERNAL_ERROR, DATABASE_BUSY,
             RESOURCE_LIMIT, FORMAT_VERSION_UNSUPPORTED, RECOVERY_FAILED, COMMIT_OUTCOME_UNKNOWN,
         ]
-        self.assertEqual(len(constants), 67)
+        self.assertEqual(len(constants), 71)
         for code in constants:
             self.assertIn(code, ALL_ERROR_CODES, f"错误码 {code} 不在 ALL_ERROR_CODES 中")
 
@@ -151,8 +157,8 @@ class TestErrorCodes(unittest.TestCase):
             self.assertIsInstance(code, str)
 
     def test_no_duplicate_error_codes(self):
-        """frozenset自动去重，如果常量重复，数量会少于56。"""
-        # 已经通过test_total_count_is_56验证
+        """frozenset自动去重，如果常量重复，数量会少于71。"""
+        # 已经通过test_total_count_is_71验证
         pass
 
 
