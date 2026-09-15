@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, call, patch
 from fakes.in_memory_storage_engine import InMemoryStorageEngine
 from fixtures.contracts import STUDENT_CATALOG_ROWS, STUDENT_SCHEMA, STUDENT_TABLE
 from minidb.catalog.catalog import SYSTEM_CATALOG_TABLE
-from minidb.catalog.catalog_manager import CatalogManager
+from minidb.catalog.catalog_manager import CatalogManager, CatalogServices
 from minidb.compiler.bound import (
     BoundAssignment,
     BoundBinary,
@@ -34,9 +34,11 @@ from minidb.core.records import RowId
 from minidb.core.result import ResultColumn
 from minidb.core.schema import DataType
 from minidb.core.source import SourcePos, SourceSpan
+from minidb.core.transaction import TransactionGuard, TransactionState
 from minidb.engine import expression_eval
 from minidb.engine.context import ExecutionContext
 from minidb.engine.executor import Executor
+from minidb.storage.row_codec import RowCodec
 
 
 class ExecutorIntegrationTests(unittest.TestCase):
@@ -45,16 +47,38 @@ class ExecutorIntegrationTests(unittest.TestCase):
     def setUp(self):
         """用已有七字段目录行装配正式目录，位置使用正式 SourceSpan。"""
         self.span = SourceSpan(SourcePos(1, 1, 0), SourcePos(1, 2, 1), "test.sql")
-        self.storage = InMemoryStorageEngine()
+        self.storage = InMemoryStorageEngine(first_user_page_id=3)
         self.addCleanup(self.storage.abort)
+        self.guard = TransactionGuard(TransactionState.BOOTSTRAP)
+        self.storage._catalog_services = CatalogServices(
+            self.guard,
+            RowCodec(),
+            lambda: 2,
+            lambda table, rows: [
+                self.storage.insert_row(table, row) for row in rows
+            ],
+            lambda index, table: None,
+        )
         CatalogManager.bootstrap_or_load(self.storage, True)
         self.storage.create_heap(STUDENT_TABLE.ref.table_id)
         for row in STUDENT_CATALOG_ROWS:
             self.storage.insert_row(SYSTEM_CATALOG_TABLE, row)
+        self.guard.transition_to(TransactionState.IDLE)
         self.catalog = CatalogManager.bootstrap_or_load(self.storage, False)
+        self.guard.transition_to(TransactionState.PREPARING)
+        self.guard.transition_to(TransactionState.ACTIVE)
         self.context = ExecutionContext(self.catalog, self.storage)
         self.executor = Executor()
         self.table = self.catalog.find_table("student")
+
+    def _reload_catalog(self):
+        self.guard.transition_to(TransactionState.COMMITTING)
+        self.guard.transition_to(TransactionState.IDLE)
+        try:
+            return CatalogManager.bootstrap_or_load(self.storage, False)
+        finally:
+            self.guard.transition_to(TransactionState.PREPARING)
+            self.guard.transition_to(TransactionState.ACTIVE)
 
     def _insert_students(self):
         """通过正式 InsertPlan 放入两行，检查已有插入逻辑的返回值。"""
@@ -75,9 +99,9 @@ class ExecutorIntegrationTests(unittest.TestCase):
     def _filtered_scan(self):
         """构造正式的 age >= 18 条件，仅描述表达式，不实现求值。"""
         predicate = BoundBinary(
-            ExprOp.GE, BoundColumn(2, DataType.INT, self.span),
+            ExprOp.GE, BoundColumn(2, DataType.INT, self.span, True),
             BoundLiteral(18, DataType.INT, self.span), DataType.BOOL,
-            self.span, self.span,
+            self.span, self.span, True,
         )
         return FilterPlan(SeqScanPlan(self.table, self.span), predicate, self.span)
 
@@ -128,10 +152,10 @@ class ExecutorIntegrationTests(unittest.TestCase):
             SeqScanPlan(self.table, self.span),
             (
                 BoundAssignment(
-                    0, BoundColumn(2, DataType.INT, self.span), self.span
+                    0, BoundColumn(2, DataType.INT, self.span, True), self.span
                 ),
                 BoundAssignment(
-                    2, BoundColumn(0, DataType.INT, self.span), self.span
+                    2, BoundColumn(0, DataType.INT, self.span, True), self.span
                 ),
             ),
             self.span,
@@ -182,10 +206,10 @@ class ExecutorIntegrationTests(unittest.TestCase):
         plan = CreateTablePlan("course", STUDENT_SCHEMA, self.span)
         result = self.executor.execute(plan, self.context)
         table = self.catalog.find_table("course")
-        self.assertEqual((table.ref.table_id, table.ref.root_page_id), (2, 3))
+        self.assertEqual((table.ref.table_id, table.ref.root_page_id), (2, 4))
         self.assertEqual(table.schema, STUDENT_SCHEMA)
         self.storage.validate_table_root(table)
-        restored = CatalogManager.bootstrap_or_load(self.storage, False)
+        restored = self._reload_catalog()
         self.assertEqual(restored.find_table("course"), table)
         self.assertEqual(result.affected_rows, 0)
         self.assertEqual(self.storage.sync_count, 0)
@@ -243,7 +267,7 @@ class ExecutorIntegrationTests(unittest.TestCase):
              patch.object(self.storage, "reclaim_empty_pages", side_effect=reclaim_pages):
             result = self.executor.execute(plan, self.context)
         self.assertEqual(events, [
-            ("delete", RowId(2, 0)), ("delete", RowId(2, 1)), ("reclaim", self.table),
+            ("delete", RowId(3, 0)), ("delete", RowId(3, 1)), ("reclaim", self.table),
         ])
         self.assertEqual(result.affected_rows, 2)
         self.assertEqual(self.executor.execute(self._project(), self.context).rows, [])
@@ -293,7 +317,7 @@ class ExecutorIntegrationTests(unittest.TestCase):
                 DeletePlan(self.table, filtered, self.span),
                 self.context,
             )
-        delete.assert_called_once_with(self.table, RowId(2, 1))
+        delete.assert_called_once_with(self.table, RowId(3, 1))
         self.assertEqual(result.affected_rows, 1)
         self.assertEqual(
             self.executor.execute(self._project(), self.context).rows,

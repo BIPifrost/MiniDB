@@ -165,11 +165,13 @@ class StorageSnapshotIntegrationTests(unittest.TestCase):
                     return original(page, encoded)
                 with patch.object(DataPage, 'insert', competing_insert):
                     with self.assertRaises(errors.DbError) as caught:
-                        session.storage.insert_row(table, (1,))
+                        session.execute_text(
+                            'INSERT INTO student(id) VALUES (1);'
+                        )
                 self.assertEqual(caught.exception.code, errors.STALE_PAGE)
                 scan = session.storage.scan_rows(table)
                 records = list(scan)
-                self.assertEqual([row.values for row in records], [(99,)])
-                self.assertEqual(session.storage.fetch_row(table, records[0].row_id), records[0])
+                # 正式 Session 会回滚整个失败语句，包括竞争写入。
+                self.assertEqual(records, [])
             finally:
                 session.abort()

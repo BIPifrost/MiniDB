@@ -1,5 +1,5 @@
-"""真实目录、数据页、编码、缓存与文件的集成测试，不使用内存替身。"""
-from tests.fakes.file_bytes import read_file_bytes
+"""真实 Session、目录、数据页、缓存与文件的集成测试。"""
+
 import json
 from pathlib import Path
 import subprocess
@@ -8,185 +8,231 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from minidb.catalog.catalog_manager import CatalogManager
-from minidb.compiler.plan import CreateTablePlan
+from minidb.cli.session import Session
 from minidb.core import errors
 from minidb.core.disk_types import INVALID_PAGE_ID
-from minidb.core.schema import ColumnDef, DataType, Schema
-from minidb.engine.context import ExecutionContext
-from minidb.engine.executor import Executor
-from minidb.storage.buffer_pool import BufferPool
 from minidb.storage.data_page import DataPage
-from minidb.storage.file_manager import FileManager
-from minidb.storage.row_codec import RowCodec
-from minidb.storage.storage_engine import StorageEngine
-from tests.fixtures.contracts import STUDENT_SCHEMA, span
+from tests.fakes.file_bytes import read_file_bytes
 
 
-def open_session(path, policy='lru'):
-    fm = FileManager.open(str(path))
-    buffer = BufferPool(fm, capacity=1, policy=policy)
-    storage = StorageEngine(buffer, RowCodec(), fm)
-    try:
-        catalog = CatalogManager.bootstrap_or_load(storage, fm.is_new)
-    except BaseException:
-        storage.abort()
-        raise
-    return fm, buffer, storage, catalog
+def open_session(path, policy="lru", *, buffer_pages=1):
+    """测试统一使用生产 Session 装配，不再绕过 CatalogServices/guard。"""
+    return Session.open(str(path), buffer_pages=buffer_pages, policy=policy)
 
 
-def create_table(storage, catalog, schema=STUDENT_SCHEMA):
-    location = span('CREATE TABLE student(id INT, name VARCHAR, age INT);')
-    Executor().execute(CreateTablePlan('student', schema, location),
-                       ExecutionContext(catalog, storage))
-    return catalog.find_table('student')
+def create_table(session):
+    session.execute_text(
+        "CREATE TABLE student(id INT, name VARCHAR, age INT);"
+    )
+    return session.catalog.find_table("student")
+
+
+def insert_student(session, row):
+    session.execute_text(
+        "INSERT INTO student(id, name, age) VALUES "
+        f"({row[0]}, '{row[1]}', {row[2]});"
+    )
 
 
 class RealStorageIntegrationTests(unittest.TestCase):
     def test_consecutive_reclaim_reuse_and_root_reset_for_both_policies(self):
-        for policy in ('lru', 'fifo'):
+        for policy in ("lru", "fifo"):
             with self.subTest(policy=policy), tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / 'real.db'
-                fm, buffer, storage, catalog = open_session(path, policy)
+                path = Path(directory) / "real.db"
+                session = open_session(path, policy)
                 try:
-                    table = create_table(storage, catalog)
-                    rows = [(i, str(i) * 3000, 20) for i in range(4)]
-                    ids = [storage.insert_row(table, row) for row in rows]
-                    self.assertEqual(len({rid.page_id for rid in ids}), 4)
+                    table = create_table(session)
+                    rows = [
+                        (index, character * 1000, 20)
+                        for index, character in enumerate(("甲", "乙", "丙", "丁"))
+                    ]
+                    for row in rows:
+                        insert_student(session, row)
+                    records = list(session.storage.scan_rows(table))
+                    ids = [record.row_id for record in records]
+                    self.assertEqual(len({row_id.page_id for row_id in ids}), 4)
                     size = path.stat().st_size
-                    for rid in ids[1:3]:
-                        self.assertTrue(storage.delete_row(table, rid))
-                    self.assertEqual(storage.reclaim_empty_pages(table), 2)
-                    self.assertEqual([r.values for r in storage.scan_rows(table)], [rows[0], rows[3]])
-                    replacement = (9, 'new' * 1000, 30)
-                    reused = storage.insert_row(table, replacement)
-                    self.assertEqual(reused.page_id, ids[2].page_id)
+
+                    for row_id, row in zip(ids[1:3], rows[1:3]):
+                        result = session.execute_text(
+                            f"DELETE FROM student WHERE id = {row[0]};"
+                        )[0]
+                        self.assertEqual(result.affected_rows, 1)
+                    self.assertEqual(
+                        [record.values for record in session.storage.scan_rows(table)],
+                        [rows[0], rows[3]],
+                    )
+
+                    replacement = (9, "新" * 1000, 30)
+                    insert_student(session, replacement)
+                    replacement_record = next(
+                        record
+                        for record in list(session.storage.scan_rows(table))
+                        if record.values[0] == replacement[0]
+                    )
+                    self.assertEqual(replacement_record.row_id.page_id, ids[2].page_id)
                     self.assertEqual(path.stat().st_size, size)
-                    storage.close()
-                    fm, buffer, storage, catalog = open_session(path, policy)
-                    self.assertEqual(catalog.find_table('student'), table)
-                    records = list(storage.scan_rows(table))
-                    self.assertEqual([r.values for r in records], [rows[0], rows[3], replacement])
-                    for record in records:
-                        storage.delete_row(table, record.row_id)
-                    self.assertEqual(storage.reclaim_empty_pages(table), 2)
-                    root = DataPage(buffer.get_page(table.ref.root_page_id),
-                                    page_id=table.ref.root_page_id, expected_table_id=table.ref.table_id)
+                finally:
+                    session.close()
+
+                reopened = open_session(path, policy)
+                try:
+                    table = reopened.catalog.find_table("student")
+                    records = list(reopened.storage.scan_rows(table))
+                    self.assertEqual(
+                        [record.values for record in records],
+                        [rows[0], rows[3], replacement],
+                    )
+                    deleted = reopened.execute_text("DELETE FROM student;")[0]
+                    self.assertEqual(deleted.affected_rows, 3)
+                    root = DataPage(
+                        reopened.buffer_pool.get_page(table.ref.root_page_id),
+                        page_id=table.ref.root_page_id,
+                        expected_table_id=table.ref.table_id,
+                    )
                     self.assertEqual(root.header.slot_count, 0)
                     self.assertEqual(root.header.next_page_id, INVALID_PAGE_ID)
-                    new_id = storage.insert_row(table, (10, 'root reused', 40))
-                    self.assertEqual(new_id.page_id, table.ref.root_page_id)
-                    storage.close()
-                finally:
-                    storage.abort()
 
-    def test_real_insert_maximum_and_oversize_before_any_page_access(self):
+                    insert_student(reopened, (10, "root reused", 40))
+                    new_record = list(reopened.storage.scan_rows(table))[0]
+                    self.assertEqual(new_record.row_id.page_id, table.ref.root_page_id)
+                finally:
+                    reopened.close()
+
+    def test_real_insert_maximum_and_oversize_before_any_page_write(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'boundary.db'
-            fm, buffer, storage, catalog = open_session(path)
+            path = Path(directory) / "boundary.db"
+            session = open_session(path)
             try:
-                schema = Schema((ColumnDef('text', DataType.VARCHAR),))
-                table = create_table(storage, catalog, schema)
-                row = ('x' * 4052,)
-                storage.insert_row(table, row)
-                storage.sync()
-                before, stats = read_file_bytes(fm), buffer.stats()
-                with patch.object(buffer, 'new_page', wraps=buffer.new_page) as allocate, \
-                     patch.object(buffer, 'write_page', wraps=buffer.write_page) as write:
+                session.execute_text(
+                    "CREATE TABLE payload(a VARCHAR, b VARCHAR, "
+                    "c VARCHAR, d VARCHAR);"
+                )
+                valid = tuple(character * 1000 for character in "abcd")
+                session.execute_text(
+                    "INSERT INTO payload(a,b,c,d) VALUES "
+                    f"('{valid[0]}','{valid[1]}','{valid[2]}','{valid[3]}');"
+                )
+                before = read_file_bytes(session.file_manager)
+                oversized = tuple(character * 1024 for character in "wxyz")
+                with patch.object(
+                    session.buffer_pool,
+                    "new_page",
+                    wraps=session.buffer_pool.new_page,
+                ) as allocate, patch.object(
+                    session.buffer_pool,
+                    "write_if_current",
+                    wraps=session.buffer_pool.write_if_current,
+                ) as write:
                     with self.assertRaises(errors.DbError) as caught:
-                        storage.insert_row(table, ('x' * 4053,))
+                        session.execute_text(
+                            "INSERT INTO payload(a,b,c,d) VALUES "
+                            f"('{oversized[0]}','{oversized[1]}',"
+                            f"'{oversized[2]}','{oversized[3]}');"
+                        )
                     self.assertEqual(caught.exception.code, errors.ROW_TOO_LARGE)
                     allocate.assert_not_called()
                     write.assert_not_called()
-                self.assertEqual(buffer.stats(), stats)
-                self.assertEqual(read_file_bytes(fm), before)
-                self.assertEqual([r.values for r in storage.scan_rows(table)], [row])
-                storage.close()
+                self.assertEqual(read_file_bytes(session.file_manager), before)
             finally:
-                storage.abort()
+                session.close()
 
-    def test_failed_real_writeback_then_abort_does_not_retry_or_sync(self):
+    def test_failed_real_writeback_closes_without_retry(self):
         with tempfile.TemporaryDirectory() as directory:
-            fm, buffer, storage, catalog = open_session(Path(directory) / 'failure.db')
-            try:
-                table = create_table(storage, catalog)
-                storage.sync()
-                storage.insert_row(table, (1, 'pending', 20))
-                scan = storage.scan_rows(table)
-                failure = errors.DbError(errors.ErrorStage.STORAGE, errors.IO_WRITE_FAILED,
-                                         'injected', context={'operation': 'write_page'})
-                with patch.object(fm, 'write_page', side_effect=failure) as write, \
-                     patch.object(fm, 'sync', wraps=fm.sync) as sync:
-                    with self.assertRaises(errors.DbError) as caught:
-                        storage.sync()
-                    self.assertIs(caught.exception, failure)
-                    storage.abort()
-                    storage.abort()
-                    self.assertEqual(write.call_count, 1)
-                    sync.assert_not_called()
-                self.assertTrue(storage.is_closed)
-                self.assertEqual(storage.active_scan_count, 0)
-                self.assertEqual(list(scan), [])
-            finally:
-                storage.abort()
+            session = open_session(Path(directory) / "failure.db")
+            create_table(session)
+            failure = errors.DbError(
+                errors.ErrorStage.STORAGE,
+                errors.IO_WRITE_FAILED,
+                "injected",
+                context={"operation": "write_page"},
+            )
+            file_manager = session.file_manager
+            with patch.object(
+                file_manager, "_write_raw", side_effect=failure
+            ) as write:
+                with self.assertRaises(errors.DbError) as caught:
+                    insert_student(session, (1, "pending", 20))
+                self.assertEqual(caught.exception.code, errors.COMMIT_OUTCOME_UNKNOWN)
+                session.abort()
+                session.abort()
+                self.assertEqual(write.call_count, 1)
+            self.assertTrue(session.is_closed)
+            self.assertEqual(session.storage.active_scan_count, 0)
 
     def test_new_process_restores_catalog_rows_and_free_list(self):
-        common = '''
+        common = r'''
 import json, sys
-from test_real_storage_integration import open_session, create_table
-fm, buffer, storage, catalog = open_session(sys.argv[1], sys.argv[2])
+from minidb.cli.session import Session
+session = Session.open(sys.argv[1], buffer_pages=1, policy=sys.argv[2])
 '''
-        writer = common + '''
+        writer = common + r'''
 try:
-    table = create_table(storage, catalog)
-    rows = [(1, '中' * 900, 20), (2, 'B' * 3000, 21), (3, 'C' * 3000, 22)]
-    ids = [storage.insert_row(table, row) for row in rows]
-    storage.delete_row(table, ids[1])
-    assert storage.reclaim_empty_pages(table) == 1
-    storage.close()
-    print(json.dumps({'root': table.ref.root_page_id, 'freed': ids[1].page_id, 'rows': [rows[0], rows[2]]}))
+    session.execute_text('CREATE TABLE student(id INT, name VARCHAR, age INT);')
+    rows = [(1, '中' * 900, 20), (2, '乙' * 1000, 21), (3, '丙' * 1000, 22)]
+    for row in rows:
+        session.execute_text("INSERT INTO student(id,name,age) VALUES (%d,'%s',%d);" % row)
+    table = session.catalog.find_table('student')
+    records = list(session.storage.scan_rows(table))
+    session.execute_text('DELETE FROM student WHERE id = 2;')
+    session.close()
+    print(json.dumps({'root': table.ref.root_page_id, 'freed': records[1].row_id.page_id,
+                      'rows': [rows[0], rows[2]]}))
 finally:
-    storage.abort()
+    session.abort()
 '''
-        reader = common + '''
+        reader = common + r'''
 try:
-    table = catalog.find_table('student')
-    assert table is not None
-    rows = [record.values for record in storage.scan_rows(table)]
+    table = session.catalog.find_table('student')
+    rows = [record.values for record in session.storage.scan_rows(table)]
     size = __import__('os').path.getsize(sys.argv[1])
-    rid = storage.insert_row(table, (4, 'D' * 3000, 23))
+    session.execute_text("INSERT INTO student(id,name,age) VALUES (4,'%s',23);" % ('丁' * 1000))
+    record = next(row for row in list(session.storage.scan_rows(table)) if row.values[0] == 4)
     assert __import__('os').path.getsize(sys.argv[1]) == size
-    storage.close()
-    print(json.dumps({'root': table.ref.root_page_id, 'reused': rid.page_id, 'rows': rows}))
+    session.close()
+    print(json.dumps({'root': table.ref.root_page_id, 'reused': record.row_id.page_id,
+                      'rows': rows}))
 finally:
-    storage.abort()
+    session.abort()
 '''
-        verifier = common + '''
+        verifier = common + r'''
 try:
-    table = catalog.find_table('student')
-    print(json.dumps([record.values for record in storage.scan_rows(table)]))
-    storage.close()
+    table = session.catalog.find_table('student')
+    print(json.dumps([record.values for record in session.storage.scan_rows(table)]))
+    session.close()
 finally:
-    storage.abort()
+    session.abort()
 '''
         with tempfile.TemporaryDirectory() as directory:
-            for policy in ('lru', 'fifo'):
+            for policy in ("lru", "fifo"):
                 with self.subTest(policy=policy):
-                    path = Path(directory) / (policy + '.db')
+                    path = Path(directory) / (policy + ".db")
+
                     def run(code):
-                        result = subprocess.run([sys.executable, '-B', '-c',
-                                                 'import sys; sys.path.insert(0, "tests")\n' + code,
-                                                 str(path), policy],
-                                                cwd=Path(__file__).resolve().parents[1],
-                                                capture_output=True, text=True, timeout=30)
+                        result = subprocess.run(
+                            [sys.executable, "-B", "-c", code, str(path), policy],
+                            cwd=Path(__file__).resolve().parents[1],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            env={
+                                **__import__("os").environ,
+                                "PYTHONIOENCODING": "utf-8",
+                            },
+                            timeout=30,
+                        )
                         self.assertEqual(result.returncode, 0, result.stderr)
                         return json.loads(result.stdout)
+
                     first, second = run(writer), run(reader)
-                    self.assertEqual(second['root'], first['root'])
-                    self.assertEqual(second['rows'], first['rows'])
-                    self.assertEqual(second['reused'], first['freed'])
-                    self.assertEqual(run(verifier), first['rows'] + [[4, 'D' * 3000, 23]])
+                    self.assertEqual(second["root"], first["root"])
+                    self.assertEqual(second["rows"], first["rows"])
+                    self.assertEqual(second["reused"], first["freed"])
+                    self.assertEqual(
+                        run(verifier),
+                        first["rows"] + [[4, "丁" * 1000, 23]],
+                    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

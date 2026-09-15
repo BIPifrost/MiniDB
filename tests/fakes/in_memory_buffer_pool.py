@@ -11,12 +11,14 @@ serialization or restart persistence. Production code must not import it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Protocol
 
 from minidb.core.disk_types import BufferStats, PAGE_SIZE
 from minidb.storage.replacement import ReplacementPolicy
 from minidb.storage._page_versions import PageVersions
 from minidb.core.disk_types import PageSnapshot
+from minidb.core.transaction import TransactionGuard
 
 
 class FileManagerLike(Protocol):
@@ -50,14 +52,19 @@ class InMemoryFileManager:
     database file. Page bytes live in a dictionary instead of on disk.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, guard: TransactionGuard | None = None) -> None:
         self._pages: dict[int, bytes] = {
             0: bytes(PAGE_SIZE),
             1: bytes(PAGE_SIZE),
         }
+        if guard is not None:
+            # v2 reserves page 2 for _sys_indexes before user page allocation.
+            self._pages[2] = bytes(PAGE_SIZE)
         self._free_pages: set[int] = set()
-        self._next_page_id = 2
+        self._next_page_id = 3 if guard is not None else 2
+        self._header = SimpleNamespace(next_page_id=self._next_page_id)
         self._closed = False
+        self._guard = guard
         # 模拟 FileManager.open 创建了一个全新文件。StorageEngine 只有在
         # 这个标记为 True 且 page 1 全零时才允许初始化系统目录。
         self._is_new = True
@@ -126,6 +133,7 @@ class InMemoryFileManager:
                 raise OverflowError("page id limit reached")
             page_id = self._next_page_id
             self._next_page_id += 1
+            self._header.next_page_id = self._next_page_id
         self._pages[page_id] = bytes(PAGE_SIZE)
         return page_id
 

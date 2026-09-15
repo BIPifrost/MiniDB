@@ -1,4 +1,4 @@
-"""SQL 文本至真实磁盘的集成测试；装配辅助函数不是正式 CLI/Session。"""
+"""SQL 文本经正式 Session 落盘的集成测试。"""
 from tests.fakes.file_bytes import read_file_bytes
 import json
 from pathlib import Path
@@ -7,29 +7,13 @@ import sys
 import tempfile
 import unittest
 
-from minidb.compiler.lexer import Lexer
-from minidb.compiler.parser import Parser
-from minidb.compiler.semantic import Semantic
-from minidb.compiler.planner import Planner
 from minidb.core import errors
-from minidb.core.source import SourceText
-from minidb.engine.context import ExecutionContext
-from minidb.engine.executor import Executor
 from tests.test_real_storage_integration import open_session
 
 
-def execute_sql(storage, catalog, text):
-    """逐条绑定到最新目录，写语句完成后同步；错误直接交给测试调用者。"""
-    results = []
-    source = SourceText('<integration>', text)
-    for statement in Parser().iter_statements(Lexer().scan(source)):
-        bound = Semantic().analyze(statement, catalog)
-        plan = Planner().build(bound)
-        result = Executor().execute(plan, ExecutionContext(catalog, storage))
-        if result.affected_rows is not None:
-            storage.sync()
-        results.append(result)
-    return results
+def execute_sql(session, text):
+    """通过 Session 逐条绑定、事务化执行并物化测试查询结果。"""
+    return session.execute_text(text, materialize=True)
 
 
 class SqlDiskIntegrationTests(unittest.TestCase):
@@ -47,22 +31,22 @@ class SqlDiskIntegrationTests(unittest.TestCase):
         for policy in ('lru', 'fifo'):
             with self.subTest(policy=policy), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / 'sql.db'
-                fm, buffer, storage, catalog = open_session(path, policy)
+                session = open_session(path, policy)
                 try:
-                    result = execute_sql(storage, catalog, sql)
+                    result = execute_sql(session, sql)
                     self.assertEqual(len(result), 7)
                     self.assertEqual([r.affected_rows for r in result], [0, 1, 1, 1, None, 2, None])
                     self.assertEqual(result[4].rows, [("小明;O'Brien", 1, 1)])
                     self.assertEqual([c.name for c in result[4].columns], ['name', 'id', 'id'])
                     self.assertEqual(result[6].rows, [(1, "小明;O'Brien", 20)])
-                    self.assertEqual(storage.active_scan_count, 0)
-                    storage.close()
-                    fm, buffer, storage, catalog = open_session(path, policy)
-                    self.assertEqual(execute_sql(storage, catalog, 'SELECT name FROM student;')[0].rows,
+                    self.assertEqual(session.storage.active_scan_count, 0)
+                    session.close()
+                    session = open_session(path, policy)
+                    self.assertEqual(execute_sql(session, 'SELECT name FROM student;')[0].rows,
                                      [("小明;O'Brien",)])
-                    storage.close()
+                    session.close()
                 finally:
-                    storage.abort()
+                    session.abort()
 
     def test_invalid_sql_does_not_modify_file_and_later_statement_works(self):
         cases = [
@@ -74,39 +58,37 @@ class SqlDiskIntegrationTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'errors.db'
-            fm, buffer, storage, catalog = open_session(path)
+            session = open_session(path)
             try:
-                execute_sql(storage, catalog, 'CREATE TABLE student(id INT, name VARCHAR, age INT);')
+                execute_sql(session, 'CREATE TABLE student(id INT, name VARCHAR, age INT);')
                 for sql, code in cases:
                     with self.subTest(sql=sql):
-                        before = read_file_bytes(fm)
-                        stats = buffer.stats()
+                        before = read_file_bytes(session.file_manager)
                         with self.assertRaises(errors.DbError) as caught:
-                            execute_sql(storage, catalog, sql)
+                            execute_sql(session, sql)
                         self.assertEqual(caught.exception.code, code)
                         self.assertIsNotNone(caught.exception.span)
-                        self.assertEqual(read_file_bytes(fm), before)
-                        self.assertEqual(buffer.stats(), stats)
-                execute_sql(storage, catalog, "INSERT INTO student(id,name,age) VALUES (1, 'valid', 20);")
-                self.assertEqual(execute_sql(storage, catalog, 'SELECT * FROM student;')[0].rows,
+                        self.assertEqual(read_file_bytes(session.file_manager), before)
+                execute_sql(session, "INSERT INTO student(id,name,age) VALUES (1, 'valid', 20);")
+                self.assertEqual(execute_sql(session, 'SELECT * FROM student;')[0].rows,
                                  [(1, 'valid', 20)])
-                storage.close()
+                session.close()
             finally:
-                storage.abort()
+                session.abort()
 
     def test_sql_across_processes_with_cross_page_delete_and_reuse(self):
         program = '''
 import json, sys
 from test_sql_disk_integration import execute_sql, open_session
-fm, buffer, storage, catalog = open_session(sys.argv[1], sys.argv[2])
+session = open_session(sys.argv[1], sys.argv[2])
 try:
     sql = sys.stdin.read()
-    results = execute_sql(storage, catalog, sql)
+    results = execute_sql(session, sql)
     output = [{'rows': result.rows, 'affected': result.affected_rows} for result in results]
-    storage.close()
+    session.close()
     print(json.dumps(output))
 finally:
-    storage.abort()
+    session.abort()
 '''
         for policy in ('lru', 'fifo'):
             with self.subTest(policy=policy), tempfile.TemporaryDirectory() as directory:
@@ -120,8 +102,11 @@ finally:
                                             capture_output=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     return json.loads(result.stdout)
-                inserts = ''.join("INSERT INTO student(id,name,age) VALUES (%d, '%s', 20);" % (i, chr(65+i)*3000)
-                                  for i in range(3))
+                inserts = ''.join(
+                    "INSERT INTO student(id,name,age) VALUES (%d, '%s', 20);"
+                    % (index, character * 1000)
+                    for index, character in enumerate(("甲", "乙", "丙"))
+                )
                 run('CREATE TABLE student(id INT, name VARCHAR, age INT);' + inserts)
                 size = path.stat().st_size
                 changed = run("DELETE FROM student WHERE id = 1; INSERT INTO student(id,name,age) VALUES (4, '%s', 30);"

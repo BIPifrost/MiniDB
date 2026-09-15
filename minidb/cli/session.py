@@ -35,6 +35,7 @@ from minidb.core.errors import (
     INPUT_READ_FAILED,
     INTERNAL_ERROR,
     INVALID_ARGUMENT,
+    INVALID_TRANSACTION_STATE,
     RESOURCE_LIMIT,
 )
 from minidb.core.expressions import ExprOp
@@ -134,6 +135,7 @@ class Session:
             else None
         )
         self._validated_tokens: set[object] = set()
+        self._applying_token: object | None = None
         self._active_cursor: ResultCursor | None = None
         self._current_prepared_id: UUID | None = None
         self._closed = False
@@ -527,31 +529,64 @@ class Session:
         self._validated_tokens.add(token)
 
     def _token_is_authorized(self, token: object) -> bool:
-        return token in self._validated_tokens
+        # 预检完成并登记还不等于可以写。只有被原子消费、当前正在 apply 的
+        # 那一个对象可以穿过 StorageEngine 的最后一道授权检查。
+        return token is self._applying_token
 
     def _consume_token(self, token: object) -> None:
-        """一次性消费已完成的写授权（工作计划 9.4）。
+        """在 apply 前原子消费并激活一次写授权（工作计划 9.4）。
 
-        消费粒度是一次 apply，而不是一次 ``storage`` 调用：同一条
-        PreparedWrite 内部的多次页修改（含目录多行写入）共用同一 token，
-        全部结束后才失效；失败路径同样消费，因为计划要求"失败后必须
-        重新 prepare"，不允许复用。
+        消费粒度是一次 apply，而不是一次 ``storage`` 调用。同一个 apply
+        内部的多次页修改（含目录多行写入）共用当前激活 token；apply 成功
+        或失败后都撤销激活，且 token 已从待用集合移除，不能再次消费。
         """
-        self._validated_tokens.discard(token)
+        if self._applying_token is not None:
+            raise DbError(
+                ErrorStage.STORAGE,
+                INVALID_TRANSACTION_STATE,
+                "已有写授权正在 apply",
+                context={"operation": "Session._consume_token"},
+            )
+        registered = next(
+            (candidate for candidate in self._validated_tokens if candidate is token),
+            None,
+        )
+        if registered is None:
+            raise DbError(
+                ErrorStage.STORAGE,
+                INVALID_ARGUMENT,
+                "token 未登记、已经消费或对象身份不匹配",
+                context={"operation": "Session._consume_token"},
+            )
+        self._validated_tokens.remove(registered)
+        self._applying_token = token
+
+    def _finish_token_apply(self, token: object) -> None:
+        """撤销当前 apply 的临时写权限；已消费 token 不放回待用集合。"""
+        if self._applying_token is not token:
+            raise DbError(
+                ErrorStage.STORAGE,
+                INVALID_TRANSACTION_STATE,
+                "结束 apply 的 token 与当前写授权不一致",
+                context={"operation": "Session._finish_token_apply"},
+            )
+        self._applying_token = None
 
     def _invalidate_prepared(self) -> None:
         self._validated_tokens.clear()
+        self._applying_token = None
 
     def _write_catalog_rows(self, table, rows) -> None:
         if self._current_prepared_id is None:
             raise DbError(ErrorStage.STORAGE, INVALID_ARGUMENT, "目录写入必须处于 ACTIVE 事务",
                           context={"operation": "Session._write_catalog_rows"})
         token = self._issue_token()
+        self._consume_token(token)
         try:
             for row in rows:
                 self.storage.insert_row(table, row, token)
         finally:
-            self._consume_token(token)
+            self._finish_token_apply(token)
 
     def _issue_token(self):
         token = _issue_validated_write_token(
@@ -576,24 +611,15 @@ class Session:
                 return result
             if isinstance(plan, InsertPlan):
                 prepared = self.executor.prepare_write(plan, context)
-                try:
-                    return self.executor.apply_write(prepared, context)
-                finally:
-                    self._consume_token(prepared.validation_token)
+                return self._apply_prepared(prepared, context)
             if isinstance(plan, UpdatePlan):
                 prepared = self.executor.prepare_write(plan, context)
-                try:
-                    return self.executor.apply_write(prepared, context)
-                finally:
-                    self._consume_token(prepared.validation_token)
+                return self._apply_prepared(prepared, context)
             if isinstance(plan, DeletePlan):
                 prepared = self._prepare_delete(plan, context)
                 if prepared is None:
                     return QueryResult(affected_rows=0, message="0 rows deleted")
-                try:
-                    return self.executor.apply_write(prepared, context)
-                finally:
-                    self._consume_token(prepared.validation_token)
+                return self._apply_prepared(prepared, context)
         # DESCRIBE/EXPLAIN 是只读诊断计划（工作计划 7.3、9.2）：只读目录和
         # 计划本身，不开启写事务、不访问数据页，因此由 Session 直接产出结果。
         if isinstance(plan, DescribePlan):
@@ -603,6 +629,15 @@ class Session:
                 plan.child, self._indexes_for_plan(plan.child), self.optimizer
             )
         return self.executor.execute(plan, context)
+
+    def _apply_prepared(self, prepared: PreparedWrite, context: ExecutionContext):
+        """Give exactly one prepared DML apply temporary StorageEngine access."""
+        token = prepared.validation_token
+        self._consume_token(token)
+        try:
+            return self.executor.apply_write(prepared, context)
+        finally:
+            self._finish_token_apply(token)
 
     def _context(self) -> ExecutionContext:
         """构造执行上下文；约束校验与 token 身份随会话一起传入。"""

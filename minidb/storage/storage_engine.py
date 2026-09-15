@@ -566,7 +566,14 @@ class StorageEngine:
             page_id = snapshot.page_id
             if page_id != row_id.page_id:
                 continue
-            record = page.record(row_id.slot_id, row_id.generation)
+            try:
+                record = page.record(row_id.slot_id, row_id.generation)
+            except errors.DbError as error:
+                # 回收逻辑会重置空根页的槽目录。此时旧 RowId 对调用者仍是
+                # “已过期的行”，不能泄漏成较低层的 SLOT_ID_INVALID。
+                if error.code != errors.SLOT_ID_INVALID:
+                    raise
+                record = None
             if record is None:
                 _error(
                     errors.STALE_ROW,

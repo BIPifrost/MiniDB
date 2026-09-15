@@ -13,11 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from minidb.core.disk_types import (
     FIRST_ALLOCATABLE_PAGE_ID, MAX_PAGE_ID, CATALOG_ROOT_PAGE_ID,
+    V2_INDEX_CATALOG_ROOT_PAGE_ID,
 )
+from minidb.core.schema import SYSTEM_INDEXES_ID
 from minidb.core.records import Row, RowId, RowScan, StoredRow
 from minidb.storage.storage_engine import StorageEngine
 
@@ -116,11 +120,15 @@ class InMemoryStorageEngine(StorageEngine):
     def initialize_reserved_heap(self, table: Any) -> None:
         self._require_mutable("initialize_reserved_heap")
         table_id, root_page_id = self._table_identity(table)
-        if table_id != 0 or root_page_id != CATALOG_ROOT_PAGE_ID:
-            raise ValueError("the reserved catalog heap must be table 0 on page 1")
+        expected = {
+            0: CATALOG_ROOT_PAGE_ID,
+            SYSTEM_INDEXES_ID: V2_INDEX_CATALOG_ROOT_PAGE_ID,
+        }
+        if expected.get(table_id) != root_page_id:
+            raise ValueError("the reserved catalog heap identity is invalid")
         if table_id in self._heaps:
             raise ValueError("the reserved catalog heap is already initialized")
-        self._heaps[0] = _Heap(table_id=0, root_page_id=CATALOG_ROOT_PAGE_ID)
+        self._heaps[table_id] = _Heap(table_id=table_id, root_page_id=root_page_id)
 
     def validate_table_root(self, table: Any) -> None:
         self._require_open("validate_table_root")
@@ -253,10 +261,18 @@ class InMemoryStorageEngine(StorageEngine):
 
         for value, column in zip(row, columns, strict=True):
             type_name = getattr(column.data_type, "name", column.data_type)
-            if type_name == "INT":
+            if value is None:
+                valid = getattr(column, "nullable", False)
+            elif type_name == "INT":
                 valid = isinstance(value, int) and not isinstance(value, bool)
             elif type_name == "VARCHAR":
                 valid = isinstance(value, str)
+            elif type_name == "BOOL":
+                valid = isinstance(value, bool)
+            elif type_name == "DATE":
+                valid = isinstance(value, date)
+            elif type_name == "DECIMAL":
+                valid = isinstance(value, Decimal)
             else:
                 raise ValueError(f"unsupported table column type: {type_name}")
             if not valid:
