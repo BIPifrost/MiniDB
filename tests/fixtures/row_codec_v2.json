@@ -1,0 +1,100 @@
+{
+  "format_version": 2,
+  "source": "MiniDB第二阶段任务执行计划.md 第 8.2、12.1、12.2 节",
+  "layout": "uint8 row_version=2 | uint8 flags=0 | uint16 column_count | ceil(column_count/8) 字节 null_bitmap | 非 NULL 字段负载",
+  "null_bitmap_rule": "第 i 列为 NULL 时 bitmap[i//8] 的 bit(i%8) 为 1；未使用高位必须为 0",
+  "cases": [
+    {
+      "name": "int_and_utf8",
+      "columns": [
+        {"name": "id", "kind": "INT", "nullable": false, "primary_key": true, "unique": true},
+        {"name": "name", "kind": "VARCHAR", "length": 64, "nullable": true}
+      ],
+      "values": [
+        {"type": "INT", "value": 1},
+        {"type": "VARCHAR", "value": "中"}
+      ],
+      "encoded_hex": "0200020000010000000000000003000000e4b8ad",
+      "encoded_size": 20
+    },
+    {
+      "name": "null_bitmap",
+      "columns": [
+        {"name": "id", "kind": "INT", "nullable": false, "primary_key": true, "unique": true},
+        {"name": "name", "kind": "VARCHAR", "length": 64, "nullable": true}
+      ],
+      "values": [
+        {"type": "INT", "value": 1},
+        {"type": "NULL"}
+      ],
+      "encoded_hex": "02000200020100000000000000",
+      "encoded_size": 13
+    },
+    {
+      "name": "decimal_two_scale",
+      "columns": [
+        {"name": "amount", "kind": "DECIMAL", "precision": 5, "scale": 2, "nullable": true}
+      ],
+      "values": [
+        {"type": "DECIMAL", "value": "12.30"}
+      ],
+      "encoded_hex": "0200010000ce04000000000000",
+      "encoded_size": 13
+    },
+    {
+      "name": "bool_true",
+      "columns": [
+        {"name": "active", "kind": "BOOL", "nullable": true}
+      ],
+      "values": [
+        {"type": "BOOL", "value": true}
+      ],
+      "encoded_hex": "020001000001",
+      "encoded_size": 6
+    },
+    {
+      "name": "date_epoch",
+      "columns": [
+        {"name": "birthday", "kind": "DATE", "nullable": true}
+      ],
+      "values": [
+        {"type": "DATE", "value": "1970-01-01"}
+      ],
+      "encoded_hex": "020001000000000000",
+      "encoded_size": 9
+    },
+    {
+      "name": "maximum_row_four_varchars",
+      "columns": [
+        {"name": "a", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "b", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "c", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "d", "kind": "VARCHAR", "length": 1024, "nullable": false}
+      ],
+      "values": [
+        {"type": "VARCHAR", "value": {"repeat": "a", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "b", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "c", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "d", "count": 963}}
+      ],
+      "encoded_size": 4056
+    },
+    {
+      "name": "maximum_row_plus_one_byte",
+      "columns": [
+        {"name": "a", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "b", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "c", "kind": "VARCHAR", "length": 1024, "nullable": false},
+        {"name": "d", "kind": "VARCHAR", "length": 1024, "nullable": false}
+      ],
+      "values": [
+        {"type": "VARCHAR", "value": {"repeat": "a", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "b", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "c", "count": 1024}},
+        {"type": "VARCHAR", "value": {"repeat": "d", "count": 964}}
+      ],
+      "expect_error": "ROW_TOO_LARGE",
+      "encoded_size": 4057
+    }
+  ]
+}
