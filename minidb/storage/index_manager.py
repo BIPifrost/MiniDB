@@ -13,7 +13,7 @@ from typing import Protocol
 
 from minidb.core import errors
 from minidb.core.disk_types import INVALID_PAGE_ID, PAGE_SIZE, PageSnapshot
-from minidb.core.records import RowId, RowMovement
+from minidb.core.records import RowId, RowMovement, StoredRow
 from minidb.core.schema import IndexBounds, IndexDef, TableDef
 from minidb.core.transaction import TransactionGuard, TransactionState
 from minidb.storage.index_page import (
@@ -206,6 +206,50 @@ class IndexManager:
         """Reserve the stable page id stored in IndexDef before tree creation."""
         self._require_write("IndexManager.reserve_anchor")
         return self._buffer.new_page()
+
+    def prepare_build_entries(
+        self,
+        table: TableDef,
+        column_index: int,
+        rows: tuple[StoredRow, ...],
+    ) -> tuple[tuple[object, RowId], ...]:
+        """Validate and order a complete CREATE INDEX input without page I/O.
+
+        Executor owns the table scan and relationship-level UNIQUE check. This
+        method owns the physical index key encoding, resource limits and the
+        canonical ``(key, RowId)`` ordering required by ``create``. Keeping the
+        ordering here prevents callers from copying IndexPage's key format.
+        """
+        if not isinstance(table, TableDef) or all(
+            candidate != table for candidate in self._catalog.list_tables()
+        ):
+            _fail(errors.INVALID_ARGUMENT, "建索引的表不属于当前目录")
+        if type(column_index) is not int or not 0 <= column_index < len(
+            table.schema.columns
+        ):
+            _fail(errors.INVALID_ARGUMENT, "建索引的列序号越界")
+        if type(rows) is not tuple or any(
+            not isinstance(row, StoredRow) for row in rows
+        ):
+            raise TypeError("rows must be tuple[StoredRow, ...]")
+        if len(rows) > MAX_BUILD_ENTRIES:
+            _fail(errors.RESOURCE_LIMIT, "建索引候选超过 100000 项")
+        row_ids = tuple(row.row_id for row in rows)
+        if len(set(row_ids)) != len(row_ids):
+            _fail(errors.INVALID_ARGUMENT, "建索引候选包含重复 RowId")
+
+        codec = IndexKeyCodec(table.schema.columns[column_index].type_spec)
+        entries = tuple(
+            IndexEntry(row.values[column_index], row.row_id) for row in rows
+        )
+        key_bytes = 0
+        for entry in entries:
+            _preflight_entry(codec, entry)
+            key_bytes += len(codec.encode(entry.value)[1])
+            if key_bytes > MAX_BUILD_KEY_BYTES:
+                _fail(errors.RESOURCE_LIMIT, "建索引候选键负载超过 16 MiB")
+        ordered = tuple(sorted(entries, key=lambda entry: _entry_key(codec, entry)))
+        return tuple((entry.value, entry.row_id) for entry in ordered)
 
     def create(
         self,

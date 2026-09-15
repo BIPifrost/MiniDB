@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from uuid import UUID, uuid4
 
 from minidb.compiler.plan import (
+    CreateIndexPlan,
     CreateTablePlan,
     DeletePlan,
     FilterPlan,
@@ -21,7 +22,16 @@ from minidb.core import errors
 from minidb.core.errors import DbError, ErrorStage, TABLE_EXISTS
 from minidb.core.records import RowMovement, RowUpdate, UpdateBatch, WriteKind
 from minidb.core.result import ExecRecord, QueryResult, ResultCursor
-from minidb.core.schema import IndexBounds, TableDef, TableRef
+from minidb.core.schema import (
+    IndexBounds,
+    IndexDef,
+    IndexOrigin,
+    PendingIndexDef,
+    TableDef,
+    TableRef,
+)
+from minidb.storage.constraints import validate_unique_stream
+from minidb.storage.index_manager import MAX_BUILD_ENTRIES
 
 from . import expression_eval
 from .context import ExecutionContext
@@ -37,6 +47,8 @@ class Executor:
         validate_plan(plan)
         if isinstance(plan, CreateTablePlan):
             return self._execute_create_table(plan, context)
+        if isinstance(plan, CreateIndexPlan):
+            return self._execute_create_index(plan, context)
         if isinstance(plan, InsertPlan):
             return self._execute_insert(plan, context)
         if isinstance(plan, ProjectPlan):
@@ -159,6 +171,69 @@ class Executor:
         context.catalog.persist_and_register(table)
         # 写入后的 sync 由 Session 统一调用，与 CatalogManager 的约定一致。
         return QueryResult(affected_rows=0, message="CREATE TABLE OK")
+
+    def _execute_create_index(
+        self, plan: CreateIndexPlan, context: ExecutionContext
+    ) -> QueryResult:
+        """Build and register one user index after complete read-only preflight."""
+        manager = context.index_manager
+        if manager is None:
+            raise RuntimeError("CreateIndexPlan requires ExecutionContext.index_manager")
+        prepare_entries = getattr(manager, "prepare_build_entries", None)
+        if not callable(prepare_entries):
+            raise RuntimeError(
+                "CreateIndexPlan requires IndexManager.prepare_build_entries"
+            )
+
+        scan = context.storage.scan_rows(plan.table)
+        rows = []
+        try:
+            for stored in scan:
+                rows.append(stored)
+                if len(rows) > MAX_BUILD_ENTRIES:
+                    raise DbError(
+                        ErrorStage.EXECUTION,
+                        errors.RESOURCE_LIMIT,
+                        "建索引候选超过 100000 项",
+                        plan.span,
+                        {
+                            "operation": "Executor.execute",
+                            "limit": MAX_BUILD_ENTRIES,
+                        },
+                    )
+        finally:
+            scan.close()
+
+        pending = PendingIndexDef(
+            plan.name, plan.column_index, plan.unique, IndexOrigin.USER
+        )
+        materialized = tuple(rows)
+        # Relationship-level uniqueness stays in the shared validator helper;
+        # physical key encoding and ordering stay in IndexManager.
+        validate_unique_stream(
+            plan.table,
+            (pending,),
+            (stored.values for stored in materialized),
+            manager,
+        )
+        entries = prepare_entries(plan.table, plan.column_index, materialized)
+
+        # No page or catalog mutation occurs before every source row and key is
+        # validated and the full canonical build order is known.
+        index_id = context.catalog.reserve_index_id()
+        anchor_id = manager.reserve_anchor()
+        index = IndexDef(
+            index_id,
+            plan.name,
+            plan.table.ref.table_id,
+            plan.column_index,
+            anchor_id,
+            plan.unique,
+            IndexOrigin.USER,
+        )
+        manager.create(index, entries)
+        context.catalog.persist_and_register_index(index)
+        return QueryResult(affected_rows=0, message="CREATE INDEX OK")
 
     def _execute_insert(self, plan: InsertPlan, context: ExecutionContext) -> QueryResult:
         """正式 InsertPlan 已携带表定义和排好列序的行，直接传给存储。"""

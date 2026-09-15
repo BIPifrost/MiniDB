@@ -208,6 +208,20 @@ class IndexManagerTests(unittest.TestCase):
         self.assertEqual(self.pages.pages, before)
         self.assertEqual(self.pages.writes, [])
 
+    def test_prepare_build_entries_orders_keys_without_page_io(self):
+        rows = (self.row("b", 2), self.row(None, 3), self.row("a", 1))
+        before = dict(self.pages.pages)
+
+        entries = self.manager.prepare_build_entries(self.table, 0, rows)
+
+        self.assertEqual(entries, (
+            (None, rows[1].row_id),
+            ("a", rows[2].row_id),
+            ("b", rows[0].row_id),
+        ))
+        self.assertEqual(self.pages.pages, before)
+        self.assertEqual(self.pages.writes, [])
+
     def test_exact_range_and_null_search_across_split_leaves(self):
         entries = [(None, RowId(100, 0, 1))]
         entries.extend((f"{number:03d}" + "x" * 390, RowId(100, number + 1, 1))
