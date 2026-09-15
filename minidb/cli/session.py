@@ -529,6 +529,16 @@ class Session:
     def _token_is_authorized(self, token: object) -> bool:
         return token in self._validated_tokens
 
+    def _consume_token(self, token: object) -> None:
+        """一次性消费已完成的写授权（工作计划 9.4）。
+
+        消费粒度是一次 apply，而不是一次 ``storage`` 调用：同一条
+        PreparedWrite 内部的多次页修改（含目录多行写入）共用同一 token，
+        全部结束后才失效；失败路径同样消费，因为计划要求"失败后必须
+        重新 prepare"，不允许复用。
+        """
+        self._validated_tokens.discard(token)
+
     def _invalidate_prepared(self) -> None:
         self._validated_tokens.clear()
 
@@ -537,8 +547,11 @@ class Session:
             raise DbError(ErrorStage.STORAGE, INVALID_ARGUMENT, "目录写入必须处于 ACTIVE 事务",
                           context={"operation": "Session._write_catalog_rows"})
         token = self._issue_token()
-        for row in rows:
-            self.storage.insert_row(table, row, token)
+        try:
+            for row in rows:
+                self.storage.insert_row(table, row, token)
+        finally:
+            self._consume_token(token)
 
     def _issue_token(self):
         token = _issue_validated_write_token(
@@ -563,15 +576,24 @@ class Session:
                 return result
             if isinstance(plan, InsertPlan):
                 prepared = self.executor.prepare_write(plan, context)
-                return self.executor.apply_write(prepared, context)
+                try:
+                    return self.executor.apply_write(prepared, context)
+                finally:
+                    self._consume_token(prepared.validation_token)
             if isinstance(plan, UpdatePlan):
                 prepared = self.executor.prepare_write(plan, context)
-                return self.executor.apply_write(prepared, context)
+                try:
+                    return self.executor.apply_write(prepared, context)
+                finally:
+                    self._consume_token(prepared.validation_token)
             if isinstance(plan, DeletePlan):
                 prepared = self._prepare_delete(plan, context)
                 if prepared is None:
                     return QueryResult(affected_rows=0, message="0 rows deleted")
-                return self.executor.apply_write(prepared, context)
+                try:
+                    return self.executor.apply_write(prepared, context)
+                finally:
+                    self._consume_token(prepared.validation_token)
         # DESCRIBE/EXPLAIN 是只读诊断计划（工作计划 7.3、9.2）：只读目录和
         # 计划本身，不开启写事务、不访问数据页，因此由 Session 直接产出结果。
         if isinstance(plan, DescribePlan):
