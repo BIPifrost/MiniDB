@@ -7,7 +7,7 @@ import logging
 import sys
 from collections.abc import Sequence
 
-from minidb.cli.display import format_result, format_trace_readable
+from minidb.cli.display import StreamFormatter, format_result, format_trace_readable
 from minidb.cli.session import Session
 from minidb.core.diagnostics import format_trace
 from minidb.core.errors import (
@@ -16,6 +16,7 @@ from minidb.core.errors import (
     INPUT_INVALID_UTF8,
     INPUT_READ_FAILED,
 )
+from minidb.core.result import ResultCursor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,22 +70,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         trace_mode = "readable" if args.trace_readable else ("json" if args.trace else None)
         sink = _trace_sink(trace_mode)
         if args.file:
-            # Session.execute_file 保留文件原始换行；trace 时由 execute_text 的同一链路输出。
-            if sink is None:
-                results = session.execute_file(args.file)
-            else:
-                text = _read_sql_file(args.file)
-                results = session.execute_text(text, source_name=args.file, trace_sink=sink)
+            # 文件先整体读入以保留原始换行；随后仍按语句流式执行。
+            text = _read_sql_file(args.file)
+            exit_code = _run_script(
+                session, text, source_name=args.file, sink=sink, trace_json=args.trace
+            )
         else:
-            return _run_interactive(session, trace_sink=sink, readable_trace=args.trace_readable)
-        for result in results:
-            _print_result(result, trace=args.trace)
+            exit_code = _run_interactive(
+                session,
+                trace_sink=sink,
+                readable_trace=args.trace_readable,
+                trace_json=args.trace,
+            )
     except DbError as error:
         if not (args.trace or args.trace_readable):
             print(str(error), file=sys.stderr)
         exit_code = 1
         if session is not None and not session.is_closed:
             session.abort()
+    except KeyboardInterrupt:
+        exit_code = 130
+        _close_quietly(session)
+    except BrokenPipeError:
+        # 下游提前关闭管道：关闭游标后正常退出，不再写任何输出。
+        exit_code = 0
+        _close_quietly(session)
     finally:
         if session is not None and not session.is_closed:
             try:
@@ -95,7 +105,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     return exit_code
 
 
-def _run_interactive(session: Session, *, trace_sink=None, readable_trace: bool = False) -> int:
+def _run_script(session: Session, text: str, *, source_name: str, sink, trace_json: bool) -> int:
+    """执行一段 SQL；SELECT 逐行输出，读取中途失败返回非零。"""
+    stream = session.iter_results(text, source_name=source_name, trace_sink=sink)
+    exit_code = 0
+    try:
+        for result in stream:
+            exit_code = max(exit_code, _emit_result(result, trace=trace_json))
+            if exit_code:
+                # 与 execute_text 一致：首次失败后不再执行本输入中的后续语句。
+                break
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return exit_code
+
+
+def _run_interactive(
+    session: Session,
+    *,
+    trace_sink=None,
+    readable_trace: bool = False,
+    trace_json: bool = False,
+) -> int:
     """运行按提交执行的交互循环。
 
     一次提交可以跨多行；只有字符串和块注释之外的分号才结束当前提交。
@@ -104,6 +137,7 @@ def _run_interactive(session: Session, *, trace_sink=None, readable_trace: bool 
     """
     buffer: list[str] = []
     had_incomplete_eof = False
+    exit_code = 0
     while True:
         prompt = "MiniDB> " if not buffer else "...> "
         print(prompt, end="", flush=True)
@@ -112,7 +146,13 @@ def _run_interactive(session: Session, *, trace_sink=None, readable_trace: bool 
             if buffer and "".join(buffer).strip():
                 had_incomplete_eof = True
                 try:
-                    session.execute_text("".join(buffer), source_name="<stdin>", trace_sink=trace_sink)
+                    exit_code = max(exit_code, _run_script(
+                        session,
+                        "".join(buffer),
+                        source_name="<stdin>",
+                        sink=trace_sink,
+                        trace_json=trace_json and not readable_trace,
+                    ))
                 except DbError as error:
                     print(str(error), file=sys.stderr)
             break
@@ -126,21 +166,81 @@ def _run_interactive(session: Session, *, trace_sink=None, readable_trace: bool 
         text = "".join(buffer)
         buffer.clear()
         try:
-            results = session.execute_text(text, source_name="<stdin>", trace_sink=trace_sink)
-            for result in results:
-                _print_result(result, trace=trace_sink is not None and not readable_trace)
+            exit_code = max(exit_code, _run_script(
+                session,
+                text,
+                source_name="<stdin>",
+                sink=trace_sink,
+                trace_json=trace_json and not readable_trace,
+            ))
         except DbError as error:
             print(str(error), file=sys.stderr)
             # 语法、语义和执行阶段的普通错误允许下一次提交；存储错误
             # 会使 Session 进入 closed/failed 状态，不能继续使用。
             if session.is_closed:
                 return 1
-    return 1 if had_incomplete_eof else 0
+    return max(exit_code, 1 if had_incomplete_eof else 0)
 
 
-def _print_result(result, *, trace: bool) -> None:
-    """正常模式打印人类可读结果，trace 模式保留稳定 JSON。"""
+def _emit_result(result, *, trace: bool) -> int:
+    """输出一条语句结果；流式 SELECT 返回非零表示结果不完整。"""
+    if isinstance(result, ResultCursor):
+        return _emit_cursor(result, trace=trace)
     print(format_trace(result) if trace else format_result(result))
+    return 0
+
+
+def _emit_cursor(cursor: ResultCursor, *, trace: bool) -> int:
+    """逐行消费 SELECT 游标；中途失败时报告 result_complete=false。"""
+    formatter = StreamFormatter(cursor.columns)
+    header_printed = False
+    try:
+        for row in cursor:
+            if not trace and not header_printed:
+                print(formatter.header())
+                header_printed = True
+            if not trace:
+                print(formatter.row(row))
+            else:
+                formatter.row(row)
+    except (KeyboardInterrupt, BrokenPipeError):
+        cursor.close()
+        raise
+    except DbError as error:
+        cursor.close()
+        _report_incomplete_result(error, formatter.count)
+        return 1
+    finally:
+        if not cursor.closed:
+            cursor.close()
+
+    if trace:
+        print(format_trace({
+            "kind": "STREAM_RESULT",
+            "columns": [column.name for column in cursor.columns],
+            "row_count": formatter.count,
+            "result_complete": True,
+        }))
+    else:
+        # count==0 时 footer() 输出 Empty set，与物化入口的显示保持一致。
+        print(formatter.footer())
+    return 0
+
+
+def _report_incomplete_result(error: DbError, rows_shown: int) -> None:
+    """流式读取第 N 行失败：已显示的行保留，并明确标记结果不完整。"""
+    print(str(error), file=sys.stderr)
+    print(f"result_complete=false; rows_shown={rows_shown}", file=sys.stderr)
+
+
+def _close_quietly(session: Session | None) -> None:
+    """中断路径优先关闭活动游标；清理失败不能盖住原始中断。"""
+    if session is None or session.is_closed:
+        return
+    try:
+        session.abort()
+    except BaseException:
+        pass
 
 
 def _has_complete_statement(text: str) -> bool:

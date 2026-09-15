@@ -14,6 +14,62 @@ from collections.abc import Mapping, Sequence
 from minidb.core.result import QueryResult
 
 
+class StreamFormatter:
+    """逐行输出结果表；列宽只依据表头，因此不用缓存整批结果。
+
+    计划第 7.4 节要求 CLI 每读取一行立即格式化输出，所以这里不能用
+    ``format_result`` 那样先看完全部行再算列宽。代价是行内长值可能比表头
+    宽，边框不会随之变宽；这是流式输出接受的取舍。
+    """
+
+    __slots__ = ("_columns", "_widths", "_count")
+
+    def __init__(self, columns: Sequence) -> None:
+        self._columns = tuple(columns)
+        self._widths = [
+            max(display_width(column.name), 1) for column in self._columns
+        ]
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def header(self) -> str:
+        names = [column.name for column in self._columns]
+        return "\n".join([
+            _border(self._widths, "-"),
+            _row_line(names, self._widths),
+            _border(self._widths, "-"),
+        ])
+
+    def row(self, row: Sequence) -> str:
+        self._count += 1
+        values = [_format_value(value) for value in row]
+        return _row_line(values, self._widths)
+
+    def footer(self) -> str:
+        if self._count == 0:
+            return "Empty set"
+        suffix = "row" if self._count == 1 else "rows"
+        return "\n".join([
+            _border(self._widths, "-"),
+            f"{self._count} {suffix} in set",
+        ])
+
+
+def _border(widths: list[int], fill: str) -> str:
+    return "+" + "+".join(fill * (width + 2) for width in widths) + "+"
+
+
+def _row_line(values: Sequence[str], widths: list[int]) -> str:
+    cells = [
+        f" {_pad(str(value), widths[index])} "
+        for index, value in enumerate(values)
+    ]
+    return "|" + "|".join(cells) + "|"
+
+
 def format_result(result: QueryResult) -> str:
     """把一个查询结果格式化成一段可直接打印的文本。"""
     if result.columns:
@@ -40,20 +96,14 @@ def _format_table(headers: list[str], rows: list[list[str]]) -> str:
         for index, value in enumerate(row):
             widths[index] = max(widths[index], display_width(value))
 
-    def line(fill: str) -> str:
-        return "+" + "+".join(fill * (width + 2) for width in widths) + "+"
-
-    def row_line(values: list[str]) -> str:
-        cells = [f" {_pad(value, widths[index])} " for index, value in enumerate(values)]
-        return "|" + "|".join(cells) + "|"
-
-    output = [line("-"), row_line(headers), line("-")]
-    output.extend(row_line(row) for row in rows)
-    output.append(line("-"))
+    output = [_border(widths, "-"), _row_line(headers, widths), _border(widths, "-")]
+    output.extend(_row_line(row, widths) for row in rows)
+    output.append(_border(widths, "-"))
     return "\n".join(output)
 
 
 def _format_value(value: object) -> str:
+    """把单个值渲染成表格单元文本（NULL/TRUE/FALSE 大写）。"""
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -188,4 +238,9 @@ def _display_scalar(value: object) -> str:
     return str(value)
 
 
-__all__ = ["display_width", "format_result", "format_trace_readable"]
+__all__ = [
+    "StreamFormatter",
+    "display_width",
+    "format_result",
+    "format_trace_readable",
+]

@@ -6,7 +6,10 @@ import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from minidb.cli.main import main
+from minidb.cli.main import _emit_cursor, _run_script, main
+from minidb.core.errors import PAGE_CORRUPTED, DbError, ErrorStage
+from minidb.core.result import ResultColumn, ResultCursor
+from minidb.core.schema import DataType
 
 
 @contextmanager
@@ -145,6 +148,124 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("UNEXPECTED_TOKEN", stderr.getvalue())
             self.assertIn("Query OK, 0 rows affected", stdout.getvalue())
+
+    def test_file_mode_streams_select_rows_and_counts_them(self):
+        # SELECT 通过 iter_results 逐行输出，并给出结果行数。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sql = root / "stream.sql"
+            db = root / "stream.db"
+            sql.write_text(
+                "CREATE TABLE t(id INT, name VARCHAR);"
+                "INSERT INTO t(id,name) VALUES (1,'A');"
+                "INSERT INTO t(id,name) VALUES (2,'B');"
+                "INSERT INTO t(id,name) VALUES (3,'C');"
+                "SELECT id,name FROM t;",
+                encoding="utf-8",
+                newline="",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--db", str(db), "--file", str(sql)])
+            self.assertEqual(code, 0)
+            output = stdout.getvalue()
+            self.assertIn("| id | name |", output)
+            self.assertIn("| 1  | A    |", output)
+            self.assertIn("| 3  | C    |", output)
+            self.assertIn("3 rows in set", output)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_empty_select_prints_empty_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sql = root / "empty.sql"
+            sql.write_text(
+                "CREATE TABLE t(id INT); SELECT id FROM t;",
+                encoding="utf-8",
+                newline="",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                code = main(["--db", str(root / "empty.db"), "--file", str(sql)])
+            self.assertEqual(code, 0)
+            self.assertIn("Empty set", stdout.getvalue())
+
+    def test_stream_failure_reports_incomplete_result_and_nonzero_exit(self):
+        # 第 N 行读取失败：已输出行保留，并明确标记 result_complete=false。
+        def rows():
+            yield (1,)
+            yield (2,)
+            raise DbError(
+                ErrorStage.STORAGE,
+                PAGE_CORRUPTED,
+                "读取第 3 行时页校验失败",
+                context={"operation": "test.stream"},
+            )
+
+        cursor = ResultCursor((ResultColumn("id", DataType.INT),), rows())
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = _emit_cursor(cursor, trace=False)
+
+        self.assertEqual(code, 1)
+        self.assertTrue(cursor.closed)
+        self.assertIn("| 1  |", stdout.getvalue())
+        self.assertIn("| 2  |", stdout.getvalue())
+        self.assertIn(PAGE_CORRUPTED, stderr.getvalue())
+        self.assertIn("result_complete=false", stderr.getvalue())
+        self.assertIn("rows_shown=2", stderr.getvalue())
+
+    def test_trace_mode_reports_stream_result_as_json(self):
+        def rows():
+            yield (1,)
+            yield (2,)
+
+        cursor = ResultCursor((ResultColumn("id", DataType.INT),), rows())
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            code = _emit_cursor(cursor, trace=True)
+        self.assertEqual(code, 0)
+        self.assertIn('"result_complete":true', stdout.getvalue())
+        self.assertIn('"row_count":2', stdout.getvalue())
+
+    def test_script_stops_after_incomplete_stream_result(self):
+        # 与 execute_text 一致：读取中途失败后不再执行同一输入里的后续语句。
+        events = []
+
+        def failing_rows():
+            yield (1,)
+            raise DbError(
+                ErrorStage.STORAGE,
+                PAGE_CORRUPTED,
+                "读取第 2 行失败",
+                context={"operation": "test.stream"},
+            )
+
+        def stream():
+            try:
+                yield ResultCursor((ResultColumn("id", DataType.INT),), failing_rows())
+                events.append("second-statement-ran")
+                yield QueryResult(affected_rows=1, message="1 row inserted")
+            finally:
+                events.append("stream-closed")
+
+        class FakeSession:
+            def iter_results(self, text, *, source_name, trace_sink):
+                return stream()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = _run_script(
+                FakeSession(), "SELECT 1; INSERT ...;",
+                source_name="<test>", sink=None, trace_json=False,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(events, ["stream-closed"])
+        self.assertIn("result_complete=false", stderr.getvalue())
 
 
 if __name__ == "__main__":

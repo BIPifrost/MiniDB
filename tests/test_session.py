@@ -27,7 +27,8 @@ class SessionTests(unittest.TestCase):
                     "INSERT INTO student(id,name,age) VALUES (2,'Bob',17);"
                     "SELECT name,id FROM student WHERE age >= 18;"
                     "DELETE FROM student WHERE id = 2;"
-                    "SELECT * FROM student;"
+                    "SELECT * FROM student;",
+                    materialize=True,
                 )
                 self.assertEqual(len(results), 6)
                 self.assertEqual(results[3].rows, [("Alice", 1)])
@@ -39,7 +40,7 @@ class SessionTests(unittest.TestCase):
             # 重新打开同一文件，确认 Session 的 sync/close 后目录和数据可恢复。
             reopened = Session.open(str(path), buffer_pages=2, policy="fifo")
             try:
-                result = reopened.execute_text("SELECT name FROM student;")[0]
+                result = reopened.execute_text("SELECT name FROM student;", materialize=True)[0]
                 self.assertEqual(result.rows, [("Alice",)])
             finally:
                 reopened.close()
@@ -53,10 +54,14 @@ class SessionTests(unittest.TestCase):
                 with self.assertRaises(DbError) as raised:
                     session.execute_text(
                         "SELECT missing FROM student;"
-                        "INSERT INTO student(id) VALUES (1);"
+                        "INSERT INTO student(id) VALUES (1);",
+                        materialize=True,
                     )
                 self.assertEqual(raised.exception.code, COLUMN_NOT_FOUND)
-                self.assertEqual(session.execute_text("SELECT * FROM student;")[0].rows, [])
+                self.assertEqual(
+                    session.execute_text("SELECT * FROM student;", materialize=True)[0].rows,
+                    [],
+                )
             finally:
                 session.close()
 

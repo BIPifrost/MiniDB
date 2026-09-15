@@ -141,7 +141,10 @@ class DatabaseLockTests(unittest.TestCase):
         session.abort()
         second = Session.open(str(self.path))
         try:
-            self.assertEqual(second.execute_text('SELECT * FROM student;')[0].rows, [])
+            self.assertEqual(
+                second.execute_text('SELECT * FROM student;', materialize=True)[0].rows,
+                [],
+            )
         finally:
             second.close()
 

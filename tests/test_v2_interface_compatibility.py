@@ -61,9 +61,22 @@ class InterfaceCompatibilityTests(unittest.TestCase):
         update = UpdatePlan(self.table, SeqScanPlan(self.table, SPAN),
                             (BoundAssignment(0, BoundLiteral(1, INT, SPAN), SPAN),), SPAN)
         for plan in (update, CreateIndexPlan("ix_id", self.table, 0, False, SPAN),
-                     DescribePlan(self.table, SPAN), ExplainPlan(update, SPAN)):
+                     DescribePlan(self.table, SPAN)):
             with self.subTest(plan=type(plan).__name__):
                 self.assertIs(Optimizer().optimize(plan), plan)
+
+    def test_explain_optimizes_only_its_child_plan(self):
+        # 工作计划 7.3 要求 EXPLAIN 如实显示 IndexScan，因此优化器必须
+        # 优化 EXPLAIN 的子计划；EXPLAIN 节点自身仍由执行器只读展示。
+        update = UpdatePlan(self.table, SeqScanPlan(self.table, SPAN),
+                            (BoundAssignment(0, BoundLiteral(1, INT, SPAN), SPAN),), SPAN)
+        explain = ExplainPlan(update, SPAN)
+        optimized = Optimizer().optimize(explain)
+        self.assertIsInstance(optimized, ExplainPlan)
+        self.assertIsNot(optimized, explain)
+        self.assertEqual(optimized.span, explain.span)
+        # UPDATE 尚无优化规则，子计划原样透传。
+        self.assertIs(optimized.child, update)
 
     def test_invalid_plan_uses_registered_plan_error_without_new_business_codes(self):
         for row in ((1 << 63,),):

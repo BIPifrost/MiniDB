@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from minidb.core import errors
 from minidb.core.disk_types import PAGE_SIZE, INVALID_PAGE_ID
-from minidb.core.schema import ColumnDef, DataType, Schema
+from minidb.core.schema import ColumnDef, DataType, Schema, TypeSpec
 from minidb.storage.buffer_pool import BufferPool
 from minidb.storage.file_manager import FileManager
 from minidb.storage.row_codec import RowCodec
@@ -53,14 +53,15 @@ class RowBufferIntegrationTests(unittest.TestCase):
         self.addCleanup(self.fm.close)
 
     def test_golden_page_survives_dirty_eviction(self):
-        expected_header = bytes.fromhex('4d4450470100010001000000ffffffff01002f00f80f00000100000000000000')
+        expected_header = bytes.fromhex('4d4450470100010001000000ffffffff01003400f80f00000100000000000000')
         page = fixture_page((1, '中'))
         self.assertEqual(page[:32], expected_header)
-        self.assertEqual(page[32:47].hex(), '010000000000000003000000e4b8ad')
-        self.assertEqual(page[47:4088], bytes(4041))
-        self.assertEqual(page[4088:].hex(), '20000f0001000000')
+        # v2 行：row_version/flags/column_count + 空值位图 + INT + VARCHAR(长度4+UTF-8 3)。
+        self.assertEqual(page[32:52].hex(), '0200020000010000000000000003000000e4b8ad')
+        self.assertEqual(page[52:4088], bytes(4036))
+        self.assertEqual(page[4088:].hex(), '2000140001000000')
         self.assertEqual(hashlib.sha256(page).hexdigest(),
-                         'd21d4e75e485ebde191e0d0d3409390daf70f5ebae38a7d6977d0ac13c051950')
+                         'cc97714598d14780a9f9aea38bd9eea7edf411ffa79f7b5555e7dd3928923dd7')
         pool = BufferPool(self.fm, 1)
         root = pool.new_page()
         pool.write_page(root, page)
@@ -69,8 +70,12 @@ class RowBufferIntegrationTests(unittest.TestCase):
         self.assertEqual(fixture_row(pool.get_page(root)), (1, '中'))
 
     def test_maximum_row_fits_exactly(self):
-        schema = Schema((ColumnDef('text', DataType.VARCHAR),))
-        row = ('a' * 4052,)
+        # 工作计划 12.2：n≤1024 限制字符数量，最大字节边界必须用多列样例。
+        schema = Schema(tuple(
+            ColumnDef(name, TypeSpec(DataType.VARCHAR, length=1024))
+            for name in ('a', 'b', 'c', 'd')
+        ))
+        row = ('a' * 1024, 'b' * 1024, 'c' * 1024, 'd' * 963)
         page = fixture_page(row, schema)
         self.assertEqual(HEADER.unpack_from(page)[6:8], (4088, 4088))
         pool = BufferPool(self.fm, 1)
@@ -82,12 +87,16 @@ class RowBufferIntegrationTests(unittest.TestCase):
     def test_oversized_row_rejected_before_fixture_allocation(self):
         # 上层必须先编码再分配；这里只验证推荐的调用顺序，非 StorageEngine。
         pool = BufferPool(self.fm, 1)
-        schema = Schema((ColumnDef('text', DataType.VARCHAR),))
+        schema = Schema(tuple(
+            ColumnDef(name, TypeSpec(DataType.VARCHAR, length=1024))
+            for name in ('a', 'b', 'c', 'd')
+        ))
+        oversized = ('a' * 1024, 'b' * 1024, 'c' * 1024, 'd' * 964)
         before = read_file_bytes(self.fm)
         with patch.object(pool, 'new_page', wraps=pool.new_page) as allocate:
             with patch.object(pool, 'write_page', wraps=pool.write_page) as write:
                 with self.assertRaises(errors.DbError) as caught:
-                    page = fixture_page(('a' * 4053,), schema)
+                    page = fixture_page(oversized, schema)
                     pool.write_page(pool.new_page(), page)
                 self.assertEqual(caught.exception.code, errors.ROW_TOO_LARGE)
                 allocate.assert_not_called()
