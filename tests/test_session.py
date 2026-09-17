@@ -168,14 +168,17 @@ class SessionTests(unittest.TestCase):
                 )[0]
 
                 self.assertEqual(
-                    [column.name for column in select_plan.columns], ["plan"]
+                    [column.name for column in select_plan.columns], ["plan", "cost"]
                 )
-                self.assertEqual(select_plan.rows, [
-                    ("Project",),
-                    ("  Filter (id = 1)",),
-                    ("    SeqScan student",),
+                # cost 列由会话内统计填充（存在时）；这里不断言具体数值，
+                # 只校验 plan 列文本与双列结构不变。
+                self.assertEqual([row[0] for row in select_plan.rows], [
+                    "Project",
+                    "  Filter (id = 1)",
+                    "    SeqScan student",
                 ])
-                self.assertEqual(insert_plan.rows, [("Insert student",)])
+                self.assertTrue(all(len(row) == 2 for row in select_plan.rows))
+                self.assertEqual(insert_plan.rows, [("Insert student", "-")])
 
                 self.assertEqual((path.stat().st_size, path.stat().st_mtime_ns), before)
                 # EXPLAIN 不执行内部语句：INSERT 只被展示，没有真的写入。
@@ -219,12 +222,13 @@ class SessionTests(unittest.TestCase):
             span,
         )
 
+        # 未提供统计时 cost 列显示 '-'；EXPLAIN 渲染规则本身不变。
         result = _explain_result(plan, (index,), Optimizer())
 
         self.assertEqual(result.rows, [
-            ("Project",),
-            ("  Filter (id = 7)",),
-            ("    IndexScan ix_id student(id) = 7",),
+            ("Project", "-"),
+            ("  Filter (id = 7)", "-"),
+            ("    IndexScan ix_id student(id) = 7", "-"),
         ])
 
 

@@ -192,6 +192,7 @@ class Parser:
         if stream.accept(TokenKind.KW_TABLE) is not None:
             return self._parse_create_table_after_prefix(stream, start)
 
+        # 处理索引创建
         unique = stream.accept(TokenKind.KW_UNIQUE) is not None
         if unique or stream.peek().kind is TokenKind.KW_INDEX:
             self._expect(stream, TokenKind.KW_INDEX)
@@ -205,6 +206,8 @@ class Parser:
         table_name = self._parse_name(stream)
         self._expect(stream, TokenKind.LPAREN)
         columns = [self._parse_column_decl(stream)]
+
+        # 如果有逗号，就继续取
         while stream.accept(TokenKind.COMMA) is not None:
             columns.append(self._parse_column_decl(stream))
         self._expect(stream, TokenKind.RPAREN)

@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-
+    #校验
     if args.syntax_check:
         invalid = []
         if args.file is None:

@@ -3,6 +3,9 @@
 Optimizer 位于 Semantic/Planner 之后、Executor 之前，只查看不可变的 Bound 和
 Plan 结构，不读取数据页、不访问目录，也不修改传入的原计划。第一版实现工作
 计划第 10.4 节规定的三类安全规则：常量比较折叠、布尔化简和恒真 Filter 消除。
+成本优化路径（第 10.4 节扩展）：调用方可选传入 ``TableStats`` 只读快照，
+按成本决定是否采用 ``choose_index_scan`` 建议的索引扫描；不传统计时保留
+原有的"有可用索引即采用"行为。
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from minidb.compiler.plan import (
     validate_plan,
 )
 from minidb.compiler.index_selection import choose_index_scan
+from minidb.compiler.statistics import TableStats, decide_scan_path
 from minidb.core.expressions import ExprOp, resolve_result_type
 from minidb.core.schema import DataType
 
@@ -41,27 +45,31 @@ class Optimizer:
     def __init__(self) -> None:
         pass
 
-    def optimize(self, plan: Plan, indexes: tuple = ()) -> Plan:
+    def optimize(self, plan: Plan, indexes: tuple = (), stats: TableStats | None = None) -> Plan:
         """返回新计划；原计划及其嵌套节点保持不变。
 
         ``indexes`` 是调用方从当前 Catalog 读取的只读索引快照。优化器不
-        访问目录；未提供索引时保留原有的顺序扫描优化行为。
+        访问目录；未提供索引时保留原有的顺序扫描优化行为。``stats`` 是
+        调用方读取的只读统计快照；提供时按成本决定是否采用索引扫描，
+        ``stats=None`` 时保持原有的"有可用索引即采用"行为。
         """
         if type(indexes) is not tuple:
             raise TypeError("indexes must be a tuple")
+        if stats is not None and type(stats) is not TableStats:
+            raise TypeError("stats must be a TableStats or None")
         validate_plan(plan)
-        optimized = self._optimize_plan(plan, indexes)
+        optimized = self._optimize_plan(plan, indexes, stats)
         # 优化可能删除 Filter，但不能产生 Executor 不接受的计划结构。
         validate_plan(optimized)
         return optimized
 
-    def _optimize_plan(self, plan: Plan, indexes: tuple) -> Plan:
+    def _optimize_plan(self, plan: Plan, indexes: tuple, stats: TableStats | None) -> Plan:
         # 新Plan接口适配：这些节点尚无优化规则，校验后原样交给后续阶段。
         # 不在此处代写UPDATE、索引或EXPLAIN的优化/执行实现。
         if isinstance(plan, (IndexScanPlan, UpdatePlan, CreateIndexPlan, DescribePlan)):
             return plan
         if isinstance(plan, ExplainPlan):
-            return ExplainPlan(self._optimize_plan(plan.child, indexes), plan.span)
+            return ExplainPlan(self._optimize_plan(plan.child, indexes, stats), plan.span)
         if isinstance(plan, CreateTablePlan):
             return CreateTablePlan(plan.table_name, plan.schema, plan.span)
         if isinstance(plan, InsertPlan):
@@ -69,7 +77,7 @@ class Optimizer:
         if isinstance(plan, SeqScanPlan):
             return SeqScanPlan(plan.table, plan.span)
         if isinstance(plan, FilterPlan):
-            child = self._optimize_plan(plan.child, indexes)
+            child = self._optimize_plan(plan.child, indexes, stats)
             predicate = self._optimize_expr(plan.predicate)
             # 恒真的过滤条件不会筛掉任何行，可以安全移除。
             if _bool_literal(predicate, True):
@@ -77,15 +85,18 @@ class Optimizer:
             if isinstance(child, SeqScanPlan) and indexes:
                 chosen = choose_index_scan(child.table, predicate, indexes, plan.span)
                 if chosen is not None:
-                    # IndexScan 只缩小候选范围，完整谓词仍需执行以处理
-                    # residual 条件、NULL 三值逻辑和边界合并以外的部分。
+                    if stats is not None:
+                        decided = decide_scan_path(chosen, stats)
+                        if decided is not None:
+                            return FilterPlan(decided, predicate, plan.span)
+                        return FilterPlan(child, predicate, plan.span)
                     return FilterPlan(chosen, predicate, plan.span)
             return FilterPlan(child, predicate, plan.span)
         if isinstance(plan, ProjectPlan):
-            child = self._optimize_plan(plan.child, indexes)
+            child = self._optimize_plan(plan.child, indexes, stats)
             return ProjectPlan(child, plan.column_indexes, plan.output_columns, plan.span)
         if isinstance(plan, DeletePlan):
-            child = self._optimize_plan(plan.child, indexes)
+            child = self._optimize_plan(plan.child, indexes, stats)
             return DeletePlan(plan.table, child, plan.span)
         raise TypeError(f"unsupported plan type: {type(plan).__name__}")
 

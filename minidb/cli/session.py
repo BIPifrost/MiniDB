@@ -25,6 +25,7 @@ from minidb.compiler.optimizer import Optimizer
 from minidb.compiler.parser import Parser
 from minidb.compiler.planner import Planner
 from minidb.compiler.semantic import Semantic
+from minidb.compiler.statistics import TableStats, collect_table_stats, node_cost
 from minidb.core.diagnostics import SyntaxCheckResult
 from minidb.core.errors import (
     ACTIVE_SCAN,
@@ -139,6 +140,8 @@ class Session:
         self._active_cursor: ResultCursor | None = None
         self._current_prepared_id: UUID | None = None
         self._closed = False
+        # 会话内统计快照（成本优化输入）：按 table_id 缓存，写操作后可能过时。
+        self._stats_cache: dict[int, TableStats] = {}
 
     @classmethod
     def open(
@@ -329,7 +332,8 @@ class Session:
                         "data": original_plan,
                     })
                 indexes = self._indexes_for_plan(original_plan)
-                plan = self.optimizer.optimize(original_plan, indexes) if self.optimize else original_plan
+                stats = self._stats_for_plan(original_plan) if self.optimize else None
+                plan = self.optimizer.optimize(original_plan, indexes, stats) if self.optimize else original_plan
                 if sink is not None:
                     sink({
                         "statement_index": statement_index,
@@ -470,7 +474,8 @@ class Session:
                     sink({"statement_index": statement_index, "stage": "SEMANTIC", "data": bound})
                 original_plan = self.planner.build(bound)
                 indexes = self._indexes_for_plan(original_plan)
-                plan = self.optimizer.optimize(original_plan, indexes) if self.optimize else original_plan
+                stats = self._stats_for_plan(original_plan) if self.optimize else None
+                plan = self.optimizer.optimize(original_plan, indexes, stats) if self.optimize else original_plan
                 if sink is not None:
                     sink({"statement_index": statement_index, "stage": "PLAN", "data": original_plan})
                     sink({"statement_index": statement_index, "stage": "OPTIMIZED_PLAN",
@@ -626,7 +631,10 @@ class Session:
             return _describe_result(plan.table)
         if isinstance(plan, ExplainPlan):
             return _explain_result(
-                plan.child, self._indexes_for_plan(plan.child), self.optimizer
+                plan.child,
+                self._indexes_for_plan(plan.child),
+                self.optimizer,
+                self._stats_for_plan(plan.child),
             )
         return self.executor.execute(plan, context)
 
@@ -817,6 +825,31 @@ class Session:
             return tuple(self.catalog.indexes_for_table(table_id))
         return ()
 
+    def _stats_for_plan(self, plan) -> TableStats | None:
+        """会话内统计快照（成本优化输入）：按 table_id 缓存。
+
+        行数为存储层实时扫描计数；页数/树高按公式估算。统计在写操作后
+        可能过时（与真实数据库 ANALYZE 的陈旧统计同类），EXPLAIN 展示时
+        会标注这一口径。读失败或非表计划时返回 None（优化回退原行为）。
+        """
+        table = getattr(plan, "table", None)
+        if table is None and hasattr(plan, "child"):
+            return self._stats_for_plan(plan.child)
+        ref = getattr(table, "ref", None)
+        table_id = getattr(ref, "table_id", None)
+        if not isinstance(table_id, int):
+            return None
+        cached = self._stats_cache.get(table_id)
+        if cached is not None:
+            return cached
+        try:
+            rows = sum(1 for _ in self.storage.scan_rows(table))
+        except DbError:
+            return None
+        stats = collect_table_stats(rows, table.schema)
+        self._stats_cache[table_id] = stats
+        return stats
+
     def close(self) -> None:
         """正常同步并关闭会话。"""
         if self._closed:
@@ -921,6 +954,7 @@ DESCRIBE_COLUMNS = (
 )
 
 EXPLAIN_COLUMN = ResultColumn("plan", DataType.VARCHAR)
+EXPLAIN_COST_COLUMN = ResultColumn("cost", DataType.VARCHAR)
 
 _OP_TEXT = {
     ExprOp.EQ: "=",
@@ -954,45 +988,56 @@ def _describe_result(table) -> QueryResult:
     )
 
 
-def _explain_result(child, indexes: tuple, optimizer) -> QueryResult:
+def _explain_result(child, indexes: tuple, optimizer, stats: TableStats | None = None) -> QueryResult:
     """把计划渲染成一行一个可读节点，不执行内部语句。
 
     工作计划 7.3 要求 EXPLAIN 在索引可用时如实显示 IndexScan 及边界，
     因此这里对子计划固定应用索引选择；没有可用索引时保持原 SeqScan，
-    不伪称已选择索引。渲染只读取计划结构，不触发任何页访问。
+    不伪称已选择索引。cost 列来自会话内统计快照（实时行数 + 公式估算），
+    缺少统计时显示 '-'；提供统计后 EXPLAIN 会做一次轻量行数扫描。
     """
-    selected = optimizer.optimize(child, indexes) if indexes else child
-    lines: list[str] = []
-    _append_plan_lines(selected, 0, lines)
+    selected = optimizer.optimize(child, indexes, stats) if indexes else child
+    lines: list[tuple[str, str]] = []
+    _append_plan_lines(selected, 0, lines, stats)
     return QueryResult(
-        columns=[EXPLAIN_COLUMN],
-        rows=[(line,) for line in lines],
+        columns=[EXPLAIN_COLUMN, EXPLAIN_COST_COLUMN],
+        rows=lines,
         message=f"{len(lines)} plan nodes",
     )
 
 
-def _append_plan_lines(plan, depth: int, lines: list[str]) -> None:
+def _cost_text(plan, stats: TableStats | None) -> str:
+    """扫描节点的估算成本文本；非扫描节点或缺少统计时显示 '-'。"""
+    value = node_cost(plan, stats)
+    if value is None:
+        return "-"
+    return f"{value:.2f}"
+
+
+def _append_plan_lines(plan, depth: int, lines: list[tuple[str, str]],
+                       stats: TableStats | None = None) -> None:
     pad = "  " * depth
+    cost = _cost_text(plan, stats)
     if isinstance(plan, ProjectPlan):
-        lines.append(f"{pad}Project")
-        _append_plan_lines(plan.child, depth + 1, lines)
+        lines.append((f"{pad}Project", cost))
+        _append_plan_lines(plan.child, depth + 1, lines, stats)
     elif isinstance(plan, FilterPlan):
-        lines.append(f"{pad}Filter {_predicate_text(plan.predicate, _plan_table(plan))}")
-        _append_plan_lines(plan.child, depth + 1, lines)
+        lines.append((f"{pad}Filter {_predicate_text(plan.predicate, _plan_table(plan))}", cost))
+        _append_plan_lines(plan.child, depth + 1, lines, stats)
     elif isinstance(plan, IndexScanPlan):
-        lines.append(f"{pad}{_index_scan_text(plan)}")
+        lines.append((f"{pad}{_index_scan_text(plan)}", cost))
     elif isinstance(plan, SeqScanPlan):
-        lines.append(f"{pad}SeqScan {plan.table.ref.name}")
+        lines.append((f"{pad}SeqScan {plan.table.ref.name}", cost))
     elif isinstance(plan, UpdatePlan):
-        lines.append(f"{pad}Update {plan.table.ref.name}")
-        _append_plan_lines(plan.child, depth + 1, lines)
+        lines.append((f"{pad}Update {plan.table.ref.name}", cost))
+        _append_plan_lines(plan.child, depth + 1, lines, stats)
     elif isinstance(plan, DeletePlan):
-        lines.append(f"{pad}Delete {plan.table.ref.name}")
-        _append_plan_lines(plan.child, depth + 1, lines)
+        lines.append((f"{pad}Delete {plan.table.ref.name}", cost))
+        _append_plan_lines(plan.child, depth + 1, lines, stats)
     elif isinstance(plan, InsertPlan):
-        lines.append(f"{pad}Insert {plan.table.ref.name}")
+        lines.append((f"{pad}Insert {plan.table.ref.name}", cost))
     else:
-        lines.append(f"{pad}{type(plan).__name__}")
+        lines.append((f"{pad}{type(plan).__name__}", cost))
 
 
 def _plan_table(plan):

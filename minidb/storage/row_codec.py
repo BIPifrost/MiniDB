@@ -164,6 +164,10 @@ class RowCodec:
 
 
 def _bitmap_size(column_count: int) -> int:
+    """返回空值位图占用的字节数：每 8 列 1 字节，向上取整。
+
+    例：1~8 列 → 1 字节，9~16 列 → 2 字节。
+    """
     return (column_count + 7) // 8
 
 
@@ -224,6 +228,11 @@ def _recheck(value: object, column, index: int, operation: str) -> object:
 
 
 def _payload_size(value: object, column, index: int, operation: str) -> int:
+    """返回单个字段负载占用的字节数，供 encoded_size 与 encode 预估整行长度。
+
+    NULL 记 0 字节；INT/BOOL/DATE/DECIMAL 为定长；VARCHAR 为 4 字节长度头
+    加 UTF-8 内容。此处只测长度，不产生任何字节。
+    """
     if value is None:
         return 0
     fixed = _FIXED_PAYLOAD_SIZE.get(column.type_spec.kind)
@@ -344,6 +353,10 @@ def _require_canonical(value: object, column, index: int, offset: int) -> None:
 
 
 def _validate_size(size: int, operation: str) -> None:
+    """检查整行编码是否超过单条记录上限（MAX_ROW_SIZE），超出即报 ROW_TOO_LARGE。
+
+    在真正分配/拼装字节之前调用，避免为最终必然被拒绝的行分配大块内存。
+    """
     if size > MAX_ROW_SIZE:
         _error(
             ROW_TOO_LARGE,
@@ -355,11 +368,19 @@ def _validate_size(size: int, operation: str) -> None:
 
 
 def _require_remaining(data: bytes, offset: int, count: int, index: int, reason: str) -> None:
+    """确认 data 从 offset 起至少还有 count 字节可读，不足即按行损坏报错。
+
+    解码时用来防止切片越界：宁可报 ROW_CORRUPTED，也不返回半截数据。
+    """
     if count > len(data) - offset:
         _corrupted(index, offset, reason)
 
 
 def _corrupted(index: int, offset: int, reason: str) -> None:
+    """统一报告“行编码损坏”：附上列号与字节偏移，方便定位坏在哪一段。
+
+    解码路径上所有完整性/一致性检查失败都经由此函数抛出 ROW_CORRUPTED。
+    """
     _error(
         ROW_CORRUPTED,
         "行编码损坏或不完整",
@@ -371,6 +392,10 @@ def _corrupted(index: int, offset: int, reason: str) -> None:
 
 
 def _invalid_argument(operation: str, field: str, expected: str, actual: str) -> None:
+    """报告调用参数不合法（类型或形状不对），抛出 INVALID_ARGUMENT。
+
+    属于“调用方用错了”的编程错误，与“页上数据坏了”的 ROW_CORRUPTED 区分开。
+    """
     _error(
         INVALID_ARGUMENT,
         f"{operation} 的 {field} 参数不合法",
